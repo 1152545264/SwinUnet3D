@@ -1,0 +1,7 @@
+/.idea/
+**/logs/
+**/PredLabel/
+*/trained_models/
+*.ckpt
+*.png
+venv_w
