@@ -94,9 +94,9 @@ class Config(object):
     # NeedTrain = False
     NeedTrain = True
     SaveTrainPred = True
-    PredSavePath = r'D:\Caiyimin\Dataset\Brats2021\Brats2021' + r'ValidSeg' + back_bone_name
     data_path = r'D:\Caiyimin\Dataset\Brats2021'
     predDir = r'D:\Caiyimin\Dataset\Brats2021\Brats2021Valid'
+    PredSavePath = r'D:\Caiyimin\Dataset\Brats2021\Brats2021' + r'ValidSeg' + back_bone_name
 
 
 class ObserveShape(transforms.MapTransform):
