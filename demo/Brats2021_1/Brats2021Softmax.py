@@ -57,9 +57,6 @@ set_determinism(42)
 
 
 class Config(object):
-    data_path = r'D:\Caiyimin\Dataset\Brats2021'
-    predDir = r'D:\Caiyimin\Dataset\Brats2021\Brats2021Valid'
-
     # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
     PadShape = [256, 256, 160]
     RoiSize = [256, 256, 160]
@@ -98,6 +95,8 @@ class Config(object):
     NeedTrain = True
     SaveTrainPred = True
     PredSavePath = r'D:\Caiyimin\Dataset\Brats2021\Brats2021' + r'ValidSeg' + back_bone_name
+    data_path = r'D:\Caiyimin\Dataset\Brats2021'
+    predDir = r'D:\Caiyimin\Dataset\Brats2021\Brats2021Valid'
 
 
 class ObserveShape(transforms.MapTransform):
