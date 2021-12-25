@@ -34,15 +34,15 @@ class Config(object):
 
     # 数据集正向区域的shape中位数为[283,248,132]，但是FinaleShape设置为[256,256,128]加上半精度， batch=1,24G显存都不够
     in_channels = 1
-    FinalShape = [224, 224, 160]
-    window_size = [7, 7, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    FinalShape = [96, 96, 96]
+    window_size = [3, 3, 3]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     slid_window_overlap = 0.5
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
     NumWorkers = 0
     n_classes = 3  # 分割总的类别数
     lr = 3e-4  # 学习率
-    PixDim = (1.0, 1.0, 1.0)
+    PixDim = (2.0, 2.0, 2.0)
 
     back_bone_name = 'SwinUnet3D'
 
@@ -119,9 +119,8 @@ class LitsDataSet(pl.LightningDataModule):
 
             transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HUMIN, a_max=cfg.HUMAX,
                                             b_min=0.0, b_max=1.0, clip=True),  # fixme 此处是否需要指定clip参数
-            # transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
+            transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
 
-            transforms.SpatialPadd(keys=['image', 'seg'], spatial_size=cfg.FinalShape),
             transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=0),
             transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=1),
             transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=2),
@@ -139,7 +138,7 @@ class LitsDataSet(pl.LightningDataModule):
 
             transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HUMIN, a_max=cfg.HUMAX,
                                             b_min=0.0, b_max=1.0, clip=True),
-            # transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
+            transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
 
             # 验证集没有做空间尺寸的变换，是因为在模型的valid_step中，我们使用了滑动窗口进行推理,即函数sliding_window_inference
 
@@ -182,16 +181,18 @@ class LITSModel(pl.LightningModule):
             self.net = UNETR(in_channels=cfg.in_channels, out_channels=cfg.n_classes, img_size=cfg.FinalShape)
 
         self.loss_func = monai.losses.DiceFocalLoss(softmax=True, to_onehot_y=True)
-        self.post_pred = Compose([transforms.AsDiscrete(argmax=True, to_onehot=cfg.n_classes)])
-        self.post_label = Compose([transforms.AsDiscrete(to_onehot=cfg.n_classes)])
+        self.post_pred = Compose([transforms.AsDiscrete(argmax=True, to_onehot=True, num_classes=cfg.n_classes)])
+        self.post_label = Compose([transforms.AsDiscrete(to_onehot=True, num_classes=cfg.n_classes)])
 
         # 这个类有bug, 当y_pred和y均为全零矩阵时，此处计算出来的dice系数为nan
         self.metrics = DiceMetric(include_background=True, reduction="mean")
         # self.metrics = dice_score
 
     def forward(self, x):
-        x = self.net(x)
-        return x
+        # x = self.net(x)
+        y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize, predictor=self.net,
+                                         overlap=cfg.slid_window_overlap)
+        return y_hat
 
     def configure_optimizers(self):
         cfg = self.cfg
@@ -204,88 +205,88 @@ class LITSModel(pl.LightningModule):
         x = batch['image']
         y = batch['seg']
         assert x.shape == y.shape
-        # y_hat = self.forward(x)
-        y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize, predictor=self.net,
-                                         overlap=cfg.slid_window_overlap)
+        y_hat = self.forward(x)
 
         dice_loss, dice = self.shared_step(y_hat=y_hat, y=y)
-        self.log('train_loss', dice_loss, prog_bar=False)
-        self.log('train_dice', dice, prog_bar=False)
-        return {'loss': dice_loss, 'train_dice': dice}
+
+        l_dice, t_dice = dice[1], dice[2]
+        self.log('train_loss', dice_loss, prog_bar=True)
+        self.log('train_liver_dice', l_dice, prog_bar=True)
+        self.log('train_tumor_dice', t_dice, prog_bar=True)
+        return {'loss': dice_loss}
 
     def validation_step(self, batch, batch_idx):
-        cfg = self.cfg
         x = batch['image']
         y = batch['seg']
 
-        y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize, predictor=self.net,
-                                         overlap=cfg.slid_window_overlap)
+        y_hat = self.forward(x)
         dice_loss, dice = self.shared_step(y_hat=y_hat, y=y)
+        l_dice, t_dice = dice[1], dice[2]
         self.log('valid_loss', dice_loss, prog_bar=False)
-        self.log('valid_dice', dice, prog_bar=False)
-        return {'valid_loss': dice_loss, 'valid_dice': dice}
+        self.log('valid_liver_dice', l_dice, prog_bar=False)
+        self.log('valid_tumor_dice', t_dice, prog_bar=True)
+        return {'loss': dice_loss}
 
     def test_step(self, batch, batch_idx):
-        cfg = self.cfg
         x = batch['image']
         y = batch['seg']
-        y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=1, predictor=self.net,
-                                         overlap=cfg.slid_window_overlap)
+        y_hat = self.forward(x)
         dice_loss, dice = self.shared_step(y_hat, y)
-        self.log('test_loss', dice_loss, prog_bar=False)
-        self.log('test_dice', dice, prog_bar=False)
-        return {'test_loss': dice_loss, 'test_dice': dice}
+        self.log('valid_loss', dice_loss, prog_bar=False)
+        self.log('valid_dice', dice, prog_bar=False)
+        return {'loss': dice_loss}
 
     def training_epoch_end(self, outputs):
-        train_losses, train_dices = self.shared_epoch_end(outputs, 'loss', 'train_dice')
-        if len(train_losses) > 0:
-            train_mean_loss = np.mean(train_losses)
-            train_mean_dice = np.mean(train_dices)
-            self.log('train_mean_loss', train_mean_loss, prog_bar=True)
-            self.log('train_mean_dice', train_mean_dice, prog_bar=True)
+        mean_loss, mean_dice = self.shared_epoch_end(outputs, 'loss')
+        l_mean_dice, t_mean_dice = mean_dice[1], mean_dice[2]
+
+        self.log('train_mean_loss', mean_loss, prog_bar=True)
+        self.log('train_mean_liver_dice', l_mean_dice, prog_bar=True)
+        self.log('train_mean_tumor_dice', t_mean_dice, prog_bar=True)
 
     def validation_epoch_end(self, outputs):
-        valid_losses, valid_dices = self.shared_epoch_end(outputs, 'valid_loss', 'valid_dice')
-        self.metrics.reset()
-        if len(valid_losses) > 0:
-            valid_mean_loss = np.mean(valid_losses)
-            valid_mean_dice = np.mean(valid_dices)
-            self.log('valid_mean_loss', valid_mean_loss, prog_bar=True)
-            self.log('valid_mean_dice', valid_mean_dice, prog_bar=True)
+        mean_loss, mean_dice = self.shared_epoch_end(outputs, 'loss')
+        l_mean_dice, t_mean_dice = mean_dice[1], mean_dice[2]
+
+        self.log('valid_mean_loss', mean_loss, prog_bar=True)
+        self.log('valid_mean_liver_dice', l_mean_dice, prog_bar=True)
+        self.log('valid_mean_tumor_dice', t_mean_dice, prog_bar=True)
 
     def test_epoch_end(self, outputs):
-        test_losses, test_dices = self.shared_epoch_end(outputs, 'test_loss', 'test_dice')
-        if len(test_losses) > 0:
-            test_mean_loss = np.mean(test_losses)
-            test_mean_dice = np.mean(test_dices)
-            self.log('test_mean_loss', test_mean_loss, prog_bar=True)
-            self.log('test_mean_dice', test_mean_dice, prog_bar=True)
+        mean_loss, mean_dice = self.shared_epoch_end(outputs, 'loss')
+        l_mean_dice, t_mean_dice = mean_dice[1], mean_dice[2]
 
-    @staticmethod
-    def shared_epoch_end(outputs, loss_key, dice_key):
-        losses, dices = [], []
+        self.log('test_mean_loss', mean_loss, prog_bar=True)
+        self.log('test_mean_liver_dice', l_mean_dice, prog_bar=True)
+        self.log('test_mean_tumor_dice', t_mean_dice, prog_bar=True)
+
+    def shared_epoch_end(self, outputs, loss_key, dice_key):
+        losses = []
         for output in outputs:
             # loss = output['loss'].detach().cpu().numpy()
             loss = output[loss_key].item()
-            dice = output[dice_key].item()
-
             losses.append(loss)
-            dices.append(dice)
         losses = np.array(losses)
-        dices = np.array(dices)
-        return losses, dices
+        mean_loss = np.mean(losses)
+
+        mean_dice = self.metrics.aggregate()
+        self.metrics.reset()
+
+        mean_dice = mean_dice.detach().cpu().numy()
+        return mean_loss, mean_dice
 
     def shared_step(self, y_hat, y):
         dice_loss = self.loss_func(y_hat, y)
 
         from monai.data import decollate_batch
-        y_hat = [self.post_pred(i) for i in decollate_batch(y_hat)]
+        y_hat = decollate_batch(y_hat)
+        y_hat = [self.post_pred(i) for i in y_hat]
         y = [self.post_label(i) for i in decollate_batch(y)]
         dice = self.metrics(y_hat, y)
-
+        dice = torch.mean(dice, dim=0)
         dice_loss = torch.nan_to_num(dice_loss)  # 避免某一次loss为nan造成后续训练全部崩掉
         dice = torch.nan_to_num(dice)
-        dice = torch.mean(dice)
+        # dice = torch.mean(dice)
 
         return dice_loss, dice
 

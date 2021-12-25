@@ -311,7 +311,6 @@ class Brats2021Model(pl.LightningModule):
     def configure_optimizers(self):
         cfg = self.cfg
         opt = optim.AdamW(params=self.net.parameters(), lr=cfg.lr, eps=1e-7, weight_decay=1e-5)
-        # opt = torch.optim.Adam(model.parameters(), 1e-4, weight_decay=1e-5)
 
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.LRCycle)
         return {'optimizer': opt, 'lr_scheduler': lr_scheduler, 'monitor': 'valid_mean_loss'}

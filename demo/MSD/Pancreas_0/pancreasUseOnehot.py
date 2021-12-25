@@ -36,22 +36,24 @@ set_determinism(42)
 class Config(object):
     data_path = r'D:\Caiyimin\Dataset\MSD\Pancreas'
 
-    FinalShape = [224, 224, 160]
-    window_size = [7, 7, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    FinalShape = [96, 96, 96]
+    window_size = [3, 3, 3]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 1
 
-    low_percent = 5.0
-    upper_percent = 95.0
+    low_percent = 0.5
+    upper_percent = 99.5
 
     # 数据集原始尺寸(体素间距为1.0时)中位数为(411,411,240)
     # 体素间距为1时，z轴最小尺寸为127，最大为499
-    ResamplePixDim = (1.5, 1.5, 1.0)
+    ResamplePixDim = (1.0, 1.0, 1.0)
+    HuMax = 50 + 350 // 2
+    HuMin = 35 - 350 // 2
 
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
     NumWorkers = 0
 
-    n_classes = 3  # 括背景,pancreas和cancer这三种
+    n_classes = 2  # 括pancreas和cancer这两个通道
 
     lr = 3e-4  # 学习率
 
@@ -61,7 +63,7 @@ class Config(object):
 
     # 滑动窗口推理时使用
     roi_size = FinalShape
-    slid_window_overlap = 0.5
+    slid_window_overlap = 0.1
 
 
 class ObserveShape(transforms.MapTransform):
@@ -73,6 +75,25 @@ class ObserveShape(transforms.MapTransform):
         for key in self.keys:
             print(d[key].shape)
             # 输入是(X,Y,Z)
+        return d
+
+
+class ConvertLabeld(transforms.MapTransform):
+    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False):
+        super(ConvertLabeld, self).__init__(keys, allow_missing_keys)
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.keys:
+            img = d[key]
+            res = []
+            # 将 tumor和pancreas合并成pancreas
+            res.append(np.logical_or(img == 1, img == 2))
+            res.append(img == 2)  # tumor通道
+
+            res = np.stack(res, axis=0)
+            res = res.astype(np.float)
+            d[key] = res
         return d
 
 
@@ -130,36 +151,40 @@ class LitsDataSet(pl.LightningDataModule):
         cfg = self.cfg
         self.train_process = Compose([
             LoadImaged(keys=['image', 'seg']),
-            transforms.EnsureChannelFirstd(keys=['image', 'seg']),
+            transforms.EnsureChannelFirstd(keys=['image']),
+            ConvertLabeld(keys='seg'),
             transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
             transforms.Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim, mode=['bilinear', 'nearest']),
-
-            # transforms.RandSpatialCropd(keys=['image', 'seg'], roi_size=cfg.FinalShape, random_size=False),
-            transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
-            transforms.CenterSpatialCropd(keys=['image', 'seg'], roi_size=cfg.FinalShape),
-
-            transforms.SpatialPadd(keys=['image', 'seg'], spatial_size=cfg.FinalShape),
 
             transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=0),
             transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=1),
             transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=2),
 
-            # transforms.NormalizeIntensityd(keys=['image'], nonzero=True, channel_wise=True),
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.low_percent, upper=cfg.upper_percent,
-                                                       b_min=0.0, b_max=1.0, clip=True, relative=True),
+            transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HuMin, a_max=cfg.HuMax,
+                                            b_min=0.0, b_max=1.0, clip=True),
+
+            transforms.CropForegroundd(keys=['image', 'seg'], source_key='seg'),  # 原参数此处是image
+            transforms.RandSpatialCropd(keys=['image', 'seg'], roi_size=cfg.FinalShape, random_size=False,
+                                        random_center=True),
+            transforms.SpatialPadd(keys=['image', 'seg'], spatial_size=cfg.FinalShape),
+
+            # transforms.RandCropByPosNegLabeld(keys=['image', 'seg'], spatial_size=cfg.FinalShape,
+            #                                   label_key='seg', image_key='image', num_samples=1),
+
             transforms.ToTensord(keys=['image', 'seg']),
 
         ])
 
         self.val_process = Compose([
             LoadImaged(keys=['image', 'seg']),
-            transforms.EnsureChannelFirstd(keys=['image', 'seg']),
+            transforms.EnsureChannelFirstd(keys=['image']),
+            ConvertLabeld(keys='seg'),
             transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
             transforms.Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim, mode=['bilinear', 'nearest']),
 
-            # transforms.NormalizeIntensityd(keys=['image'], nonzero=True, channel_wise=True),
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.low_percent, upper=cfg.upper_percent,
-                                                       b_min=0.0, b_max=1.0, clip=True, relative=True),
+            transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HuMin, a_max=cfg.HuMax,
+                                            b_min=0.0, b_max=1.0, clip=True),
+            transforms.CropForegroundd(keys=['image', 'seg'], source_key='seg'),
             transforms.ToTensord(keys=['image', 'seg']),
         ])
 
@@ -188,8 +213,8 @@ class Lung(pl.LightningModule):
         super(Lung, self).__init__()
         self.cfg = cfg
         if cfg.back_bone_name == 'SwinUnet':
-            self.net = swinUnet_t_3D(window_size=cfg.window_size, num_classes=cfg.n_classes, in_channel=cfg.in_channels,
-                                     flatten_dim=64)
+            self.net = swinUnet_t_3D(window_size=cfg.window_size, num_classes=cfg.n_classes,
+                                     in_channel=cfg.in_channels, )
         else:
             from monai.networks.nets import UNETR, UNet
             if cfg.back_bone_name == 'UnetR':
@@ -199,13 +224,14 @@ class Lung(pl.LightningModule):
                                 channels=(32, 64, 128, 256, 512),
                                 strides=(2, 2, 2, 2))
 
-        # self.loss_func = DiceFocalLoss(to_onehot_y=True, softmax=True, include_background=True)
-        self.loss_func = FocalLoss(include_background=True, to_onehot_y=True, )
+        self.loss_func = DiceLoss(include_background=True)
 
-        self.post_transform = nn.Softmax(dim=1)
+        self.post_pred = Compose([
+            transforms.EnsureType(), transforms.Activations(sigmoid=True),
+            transforms.AsDiscrete(threshold_values=True)
+        ])
 
-        self.metrics_monai = DiceMetric(include_background=True)
-        self.metrics = dice_score
+        self.metrics = DiceMetric(include_background=True, reduction='mean_batch')
         self.acc = Accuracy()
 
     def configure_optimizers(self):
@@ -219,17 +245,17 @@ class Lung(pl.LightningModule):
         return opt
 
     def training_step(self, batch, batch_idx):
+
         x = batch['image']
         y = batch['seg']
-
-        self.check_input_size(x, y)
-
         y_hat = self.net(x)
-        dice_loss, dice, pa = self.shared_step(y_hat=y_hat, y=y)
-        self.log('train_loss', dice_loss, prog_bar=True)
-        self.log('train_dice', dice, prog_bar=True)
-        self.log('train_pixelAcc', pa, prog_bar=True)
-        return {'loss': dice_loss, 'train_dice': dice, 'train_pa': pa}
+
+        loss, dice = self.shared_step(y_hat=y_hat, y=y)
+        p_dice, t_dice = dice[0], dice[1]
+        self.log('train_loss', loss, prog_bar=True)
+        self.log('train_pancreas_dice', p_dice, prog_bar=True)
+        self.log('train_tumor_dice', t_dice, prog_bar=True)
+        return {'loss': loss}
 
     def validation_step(self, batch, batch_idx):
         cfg = self.cfg
@@ -237,11 +263,12 @@ class Lung(pl.LightningModule):
         y = batch['seg']
         y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize, predictor=self.net,
                                          overlap=cfg.slid_window_overlap)
-        dice_loss, dice, pa = self.shared_step(y_hat=y_hat, y=y)
-        self.log('valid_loss', dice_loss, prog_bar=True)
-        self.log('valid_dice', dice, prog_bar=True)
-        self.log('valid_pixelAcc', pa, prog_bar=True)
-        return {'valid_loss': dice_loss, 'valid_dice': dice, 'valid_pa': pa}
+        loss, dice = self.shared_step(y_hat=y_hat, y=y)
+        p_dice, t_dice = dice[0], dice[1]
+        self.log('valid_loss', loss, prog_bar=True)
+        self.log('valid_pancreas_dice', p_dice, prog_bar=True)
+        self.log('valid_tumor_dice', t_dice, prog_bar=True)
+        return {'loss': loss}
 
     def test_step(self, batch, batch_idx):
         cfg = self.cfg
@@ -249,77 +276,65 @@ class Lung(pl.LightningModule):
         y = batch['seg']
         y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=1, predictor=self.net,
                                          overlap=cfg.slid_window_overlap)
-        dice_loss, dice, pa = self.shared_step(y_hat, y)
-        self.log('test_loss', dice_loss, prog_bar=False)
-        self.log('test_dice', dice, prog_bar=False)
-        self.log('test_pa', pa, prog_bar=False)
-        return {'test_loss': dice_loss, 'test_dice': dice, 'test_pa': pa}
+
+        loss, dice = self.shared_step(y_hat=y_hat, y=y)
+        p_dice, t_dice = dice[0], dice[1]
+        self.log('test_loss', loss, prog_bar=True)
+        self.log('test_pancreas_dice', p_dice, prog_bar=True)
+        self.log('test_tumor_dice', t_dice, prog_bar=True)
+        return {'loss': loss}
 
     def training_epoch_end(self, outputs):
-        train_losses, train_dices, train_pas = self.shared_epoch_end(outputs, 'loss', 'train_dice', 'train_pa')
-        if len(train_losses) > 0:
-            train_mean_loss = np.mean(train_losses)
-            train_mean_dice = np.mean(train_dices)
-            train_mean_pa = np.mean(train_pas)
-            self.log('train_mean_loss', train_mean_loss, prog_bar=True)
-            self.log('train_mean_dice', train_mean_dice, prog_bar=True)
-            self.log('train_mean_pa', train_mean_pa, prog_bar=True)
+        losses, dice = self.shared_epoch_end(outputs, 'loss')
+        p_dice, t_dice = dice[0], dice[1]
+        self.log('train_mean_loss', losses, prog_bar=True)
+        self.log('train_mean_pancreas_dice', p_dice, prog_bar=True)
+        self.log('train_mean_tumor_dice', t_dice, prog_bar=True)
 
     def validation_epoch_end(self, outputs):
-        valid_losses, valid_dices, valid_pas = self.shared_epoch_end(outputs, 'valid_loss', 'valid_dice', 'valid_pa')
-        if len(valid_losses) > 0:
-            valid_mean_loss = np.mean(valid_losses)
-            valid_mean_dice = np.mean(valid_dices)
-            valid_mean_pa = np.mean(valid_pas)
-            self.log('valid_mean_loss', valid_mean_loss, prog_bar=True)
-            self.log('valid_mean_dice', valid_mean_dice, prog_bar=True)
-            self.log('valid_mean_pa', valid_mean_pa, prog_bar=True)
+        losses, dice = self.shared_epoch_end(outputs, 'loss')
+        p_dice, t_dice = dice[0], dice[1]
+        self.log('valid_mean_loss', losses, prog_bar=True)
+        self.log('valid_mean_pancreas_dice', p_dice, prog_bar=True)
+        self.log('valid_mean_tumor_dice', t_dice, prog_bar=True)
 
     def test_epoch_end(self, outputs):
-        test_losses, test_dices, test_pas = self.shared_epoch_end(outputs, 'test_loss', 'test_dice', 'test_pa')
-        if len(test_losses) > 0:
-            test_mean_loss = np.mean(test_losses)
-            test_mean_dice = np.mean(test_dices)
-            test_mean_pa = np.mean(test_pas)
-            self.log('test_mean_loss', test_mean_loss, prog_bar=True)
-            self.log('test_mean_dice', test_mean_dice, prog_bar=True)
-            self.log('test_mean_pa', test_mean_pa, prog_bar=True)
+        losses, dice = self.shared_epoch_end(outputs, 'loss')
+        p_dice, t_dice = dice[0], dice[1]
+        self.log('valid_mean_loss', losses, prog_bar=True)
+        self.log('valid_mean_pancreas_dice', p_dice, prog_bar=True)
+        self.log('valid_mean_tumor_dice', t_dice, prog_bar=True)
 
-    @staticmethod
-    def shared_epoch_end(outputs, loss_key, dice_key, pa_key):
-        losses, dices, pas = [], [], []
+    def shared_epoch_end(self, outputs, loss_key):
+        losses = []
         for output in outputs:
             # loss = output['loss'].detach().cpu().numpy()
             loss = output[loss_key].item()
-            dice = output[dice_key].item()
-            pa = output[pa_key].item()
-
             losses.append(loss)
-            dices.append(dice)
-            pas.append(pa)
+
         losses = np.array(losses)
-        dices = np.array(dices)
-        pas = np.array(pas)
-        return losses, dices, pas
+        losses = np.mean(losses)
+
+        dice = self.metrics.aggregate()
+        self.metrics.reset()
+
+        dice = dice.detach().cpu().numpy()
+        return losses, dice
 
     def shared_step(self, y_hat, y):
-        y_hat = self.post_transform(y_hat)
-        dice_loss = self.loss_func(y_hat, y)
+        loss = self.loss_func(y_hat, y)
+        y_hat = decollate_batch(y_hat)
+        y = decollate_batch(y)  # fixme:验证这个是否正确
 
-        temp = torch.argmax(y_hat, dim=1, keepdim=True)
-        pa = (temp == y).sum() / y.numel()  # 像素准确率
+        y_hat = [self.post_pred(it) for it in y_hat]
 
-        y_hat = (y_hat > 0.5).float()
-        predict_vis = rearrange(y_hat, 'b c h w d -> b h w d c')
-        y = one_hot(y, num_classes=cfg.n_classes)
-        dice = dice_score(y_hat, y)
-        return dice_loss, dice, pa
+        dice = self.metrics(y_hat, y)
 
-    def check_input_size(self, x, y):
-        x_r, x_a, x_s = x.shape[2:]
-        y_r, y_a, y_s = y.shape[2:]
-        x_shape, y_shape = [x_r, x_a, x_s], [y_r, y_a, y_s]
-        assert x_shape == cfg.FinalShape and y_shape == self.cfg.FinalShape
+        dice = torch.nan_to_num(dice)
+        loss = torch.nan_to_num(loss)
+
+        dice = torch.mean(dice, dim=0)
+        return loss, dice
 
 
 def dice_coefficient(y_hat, y):
