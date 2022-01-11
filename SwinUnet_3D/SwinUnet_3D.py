@@ -355,7 +355,7 @@ class StageModuleDownScaling3D(nn.Module):
                             dropout=dropout),
             ]))
 
-    def forward(self, x, encoder_feature):
+    def forward(self, x):
         x = self.patch_partition(x)
         for regular_block, shifted_block in self.layers:
             x = regular_block(x)
@@ -395,21 +395,23 @@ class StageModuleUpScaling3D(nn.Module):
         return x
 
 
-class DimChange(nn.Module):
-    def __init__(self, in_dim: int, out_dim, dropout: float = 0.1):
-        super(DimChange, self).__init__()
+class Converge(nn.Module):
+    def __init__(self, in_dim: int, out_dim):
+        super(Converge, self).__init__()
         self.in_dim = in_dim
         self.linear = nn.Linear(in_dim, out_dim)
         self.norm = nn.LayerNorm(out_dim)
-        self.act = nn.GELU()
 
-    def forward(self, x):
-        # x: B,C,X,Y,Z
+    def forward(self, x, enc_x):
+        '''
+         x: B,C,X,Y,Z
+        enc_x:B,C,X,Y,Z
+        '''
+        assert x.shape == enc_x.shape
+        x = torch.cat([x, enc_x], dim=1)
         x = rearrange(x, 'b c x y z -> b x y z c')
         x = self.linear(x)
         x = self.norm(x)
-        x = self.act(x)
-
         x = rearrange(x, 'b x y z c -> b c x y z')
         return x
 
@@ -462,9 +464,9 @@ class SwinUnet3D(nn.Module):
 
                                                 relative_pos_embedding=relative_pos_embedding)
 
-        self.converge1 = DimChange(hidden_dim * 8, hidden_dim * 4)  # 用于融合upstage和对应的downstage输出的特征，下同
-        self.converge2 = DimChange(hidden_dim * 4, hidden_dim * 2)
-        self.converge3 = DimChange(hidden_dim * 2, hidden_dim)
+        self.converge1 = Converge(hidden_dim * 8, hidden_dim * 4)  # 用于融合upstage和对应的downstage输出的特征，下同
+        self.converge2 = Converge(hidden_dim * 4, hidden_dim * 2)
+        self.converge3 = Converge(hidden_dim * 2, hidden_dim)
 
         self.final_resume = PatchExpand3D(in_dim=hidden_dim, out_dim=num_classes,
                                           up_scaling_factor=downscaling_factors[0])
@@ -498,19 +500,16 @@ class SwinUnet3D(nn.Module):
         down4 = self.down_stage4(down3)  # (B, 8C,X//32, Y//32, Z//32)
 
         up1 = self.up_stage1(down4)  # (B, 4C, X//16, Y//16, Z//16, )
-        # fixme up1和 down3融合
-        up1 = torch.cat([up1, down3], dim=1)  # (B, 8C,X//16, Y//16, Z//16)
-        up1 = self.converge1(up1)  # (B, 4C, X//16, Y//16, Z//16, 4C)
+        # up1和 down3融合
+        up1 = self.converge1(up1, down3)  # (B, 4C, X//16, Y//16, Z//16, 4C)
 
         up2 = self.up_stage2(up1)  # ((B, 2C,X//8, Y//8, Z//8, 2C)
-        #  fixme up2和 down2融合
-        up2 = torch.cat([up2, down2], dim=1)  # (B, 4C, X//8, Y//8, Z//8)
-        up2 = self.converge2(up2)  # (B,2C, X//8, Y//8, Z//8)
+        # up2和 down2融合
+        up2 = self.converge2(up2, down2)  # (B,2C, X//8, Y//8, Z//8)
 
         up3 = self.up_stage3(up2)  # (B,C, X//4, Y//4, Z// 4,C)
-        # TODO up3和 down1融合
-        up3 = torch.cat([up3, down1], dim=1)  # (B,2C, X//4, Y//4, Z//4)
-        up3 = self.converge3(up3)  # (B,C, X//4, Y//4, Z//4)
+        # up3和 down1融合
+        up3 = self.converge3(up3, down1)  # (B,C, X//4, Y//4, Z//4)
 
         out = self.final_resume(up3)  # (B,num_classes, X, Y, Z)
         out = rearrange(out, 'b x y z c -> b c x y z')
@@ -518,7 +517,7 @@ class SwinUnet3D(nn.Module):
 
     def init_weight(self):
         for m in self.modules():
-            if isinstance(m, (nn.Linear, nn.Conv3d)):
+            if isinstance(m, nn.Linear):
                 trunc_normal_(m.weight, std=0.02)
                 # trunc_normal_(m.weight, mean=0.0, std=0.02, a=-2.0, b=2.0)
                 if m.bias is not None:
@@ -528,17 +527,17 @@ class SwinUnet3D(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
 
-def swinUnet_t_3D(hidden_dim=96, layers=(2, 2, 6, 2), heads=(3, 6, 12, 24), **kwargs):
-    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, **kwargs)
+def swinUnet_t_3D(hidden_dim=96, layers=(2, 2, 6, 2), heads=(3, 6, 12, 24), num_classes: int = 2, **kwargs):
+    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, num_classes=num_classes, **kwargs)
 
 
-def swinUnet_s_3D(hidden_dim=96, layers=(2, 2, 18, 2), heads=(3, 6, 12, 24), **kwargs):
-    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, **kwargs)
+def swinUnet_s_3D(hidden_dim=96, layers=(2, 2, 18, 2), heads=(3, 6, 12, 24), num_classes: int = 2, **kwargs):
+    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, num_classes=num_classes, **kwargs)
 
 
-def swinUnet_b_3D(hidden_dim=192, layers=(2, 2, 18, 2), heads=(4, 8, 16, 32), **kwargs):
-    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, **kwargs)
+def swinUnet_b_3D(hidden_dim=192, layers=(2, 2, 18, 2), heads=(4, 8, 16, 32), num_classes: int = 2, **kwargs):
+    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, num_classes=num_classes, **kwargs)
 
 
-def swinUnet_l_3D(hidden_dim=192, layers=(2, 2, 18, 2), heads=(6, 12, 24, 48), **kwargs):
-    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, **kwargs)
+def swinUnet_l_3D(hidden_dim=192, layers=(2, 2, 18, 2), heads=(6, 12, 24, 48), num_classes: int = 2, **kwargs):
+    return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, num_classes=num_classes, **kwargs)

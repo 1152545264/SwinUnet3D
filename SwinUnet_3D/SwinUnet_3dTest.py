@@ -37,9 +37,8 @@ def testSwinUnet3D():
     #               B,  C, X_S, Y_S, Z_S
     x = torch.randn((1, 3, 96, 96, 96))
     seg = SwinUnet_3D.swinUnet_t_3D(hidden_dim=96, layers=(2, 2, 6, 2), heads=(3, 6, 12, 24),
-                                    #          x_ws，y_ws,z_ws
-                                    window_size=[3, 3, 3], in_channel=3,
-                                    flatten_dim=192)
+                                    window_size=[3, 3, 3], in_channel=3, num_classes=4
+                                    )
     '''
     必需保证： X_S%(x_ws*32) == 0
              Y_S%(y_ws*32) == 0
@@ -52,4 +51,4 @@ def testSwinUnet3D():
     print(y.shape)
 
 
-# testSwinUnet3D()
+testSwinUnet3D()
