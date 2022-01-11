@@ -1,8 +1,9 @@
 # -*-coding:utf-8-*-
 import os
+import random
 
 import torch
-from torch import nn, functional as F
+from torch import nn, functional as F, optim
 import monai
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
@@ -13,16 +14,58 @@ from monai.data import Dataset, SmartCacheDataset
 from torch.utils.data import DataLoader, random_split
 from glob import glob
 import numpy as np
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
+from torch.utils.data import random_split
+from SwinUnet_3D import swinUnet_t_3D
+from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss, FocalLoss
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.inferers import sliding_window_inference
+from monai.utils import set_determinism
+from monai.data import decollate_batch, list_data_collate
+from monai.networks.utils import one_hot
+from einops import rearrange
+from torchmetrics.functional import dice_score
+from torchmetrics import IoU, Accuracy
+from monai.transforms import (
+    Activations,
+    Activationsd,
+    AsDiscrete,
+    AsDiscreted,
+    Compose,
+    Invertd,
+    LoadImaged,
+    MapTransform,
+    NormalizeIntensityd,
+    Orientationd,
+    RandFlipd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    RandSpatialCropd,
+    Spacingd,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    EnsureType,
+    ConvertToMultiChannelBasedOnBratsClassesd,
+    SpatialPadd,
+    ScaleIntensityRangePercentilesd,
+    ScaleIntensityRanged,
+    CropForegroundd,
+    RandCropByPosNegLabeld
+)
+
+pl.seed_everything(42)
+set_determinism(42)
 
 
-class Config:
-    data_path = r'D:\Caiyimin\Dataset\MSD\Pancreas'
-    img_path = os.path.join(data_path, 'imagesTr')
-    window_center = min(30, 40)
-    window_level = max(100, 200)
-    HuMax = 250
-    HuMin = -200
+class Config(object):
+    data_path = r'D:\Caiyimin\Dataset\Verse2020'
+    img_path = os.path.join(data_path, 'image')
+    mask_path = os.path.join(data_path, 'label')
+
+    HuMin = 35 - 350 / 2
+    HuMax = 45 + 350 / 2
 
 
 cfg = Config()
@@ -33,9 +76,17 @@ count_transform = Compose([
     transforms.Spacing(pixdim=(1.0, 1.0, 1.0))
 ])
 
+img_path = cfg.img_path
+
 
 def getImageFiles():
-    img_files = sorted(glob(os.path.join(cfg.img_path, '*.nii.gz')))
+    img_files = []
+
+    for FatherPath, dirs, _ in os.walk(img_path):
+        for dr in dirs:
+            fullPath = os.path.join(FatherPath, dr)
+            file = glob(os.path.join(fullPath, '**.nii.gz'))
+            img_files.append(*file)
     img_dict = []
     for file in img_files:
         tmp = {'image': file}
@@ -104,3 +155,4 @@ def countInfo(img_files: [dict], images_size=resample_size):
 
 img_dicts = getImageFiles()
 countInfo(img_dicts)
+

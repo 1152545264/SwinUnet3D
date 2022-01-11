@@ -1,7 +1,9 @@
+# -*-coding:utf-8-*-
 import os
+import random
 
 import torch
-from torch import nn, functional as F
+from torch import nn, functional as F, optim
 import monai
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
@@ -12,153 +14,136 @@ from monai.data import Dataset, SmartCacheDataset
 from torch.utils.data import DataLoader, random_split
 from glob import glob
 import numpy as np
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
+from torch.utils.data import random_split
+from SwinUnet_3D import swinUnet_t_3D
+from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss, FocalLoss
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.inferers import sliding_window_inference
+from monai.utils import set_determinism
+from monai.data import decollate_batch, list_data_collate
+from monai.networks.utils import one_hot
+from einops import rearrange
+from torchmetrics.functional import dice_score
+from torchmetrics import IoU, Accuracy
+from monai.transforms import (
+    Activations,
+    Activationsd,
+    AsDiscrete,
+    AsDiscreted,
+    Compose,
+    Invertd,
+    LoadImaged,
+    MapTransform,
+    NormalizeIntensityd,
+    Orientationd,
+    RandFlipd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    RandSpatialCropd,
+    Spacingd,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    EnsureType,
+    ConvertToMultiChannelBasedOnBratsClassesd,
+    SpatialPadd,
+    ScaleIntensityRangePercentilesd,
+    ScaleIntensityRanged,
+    CropForegroundd,
+    RandCropByPosNegLabeld
+)
 
-data_path = r'D:\Caiyimin\Dataset\LITSChallenge'
-window_center = min(30, 40)
-window_level = max(100, 200)
-HUMAX = 250
-HUMIN = -200
+pl.seed_everything(42)
+set_determinism(42)
 
 
-class CropPositiveRegion(transforms.Transform):
+class Config(object):
+    data_path = r'D:\Caiyimin\Dataset\LITSChallenge'
+    # img_path = os.path.join(data_path, 'image')
+    # mask_path = os.path.join(data_path, 'label')
 
-    def __init__(self, **kwargs):
-        super(CropPositiveRegion, self).__init__(**kwargs)
-
-    def __call__(self, data):
-        d = data
-        x_s, y_s, z_s = d.shape  # x:0 y:1 z:2
-        z = np.any(d, axis=(0, 1))  # 寻找Z轴的非零区域
-        z_tmp = np.where(z)
-        z_start, z_end = z_tmp[0][[0, -1]]
-
-        x = np.any(d, axis=(1, 2))
-        x_tmp = np.where(x)
-        x_start, x_end = x_tmp[0][[0, -1]]
-
-        y = np.any(d, axis=(0, 2))
-        y_tmp = np.where(y)
-        y_start, y_end = y_tmp[0][[0, -1]]
-
-        d = d[x_start:x_end, y_start:y_end, z_start:z_end]
-
-        return d
+    HuMin = 35 - 350 / 2
+    HuMax = 45 + 350 / 2
 
 
-def analysis_data():
-    shape_x, shape_y, shape_z = [], [], []
-    train_path = os.path.join(data_path, 'Training')
-    train_files = glob(os.path.join(train_path, 'volume-*.nii'))
-    for file in train_files:
-        img_tmp = LoadImage()(file)
-        img = img_tmp[0]
-        '''
-        loader = LoadImage()
+cfg = Config()
+
+count_transform = Compose([
+    LoadImage(image_only=True),
+    transforms.EnsureChannelFirst(),
+    transforms.Spacing(pixdim=(1.0, 1.0, 1.0))
+])
+
+
+def getImageFiles():
+    img_files = sorted(glob(os.path.join(cfg.data_path, 'volume*.nii')))
+    img_dict = []
+    for file in img_files:
+        tmp = {'image': file}
+        img_dict.append(tmp)
+    return img_dict
+
+
+resample_size = []
+
+
+def countInfo(img_files: [dict], images_size=resample_size):
+    org_size = []
+    foreground_size = []
+    loader = LoadImaged(keys=['image'], image_only=False)
+    add_chan = transforms.AddChanneld(keys=['image'])
+    spa_trans = transforms.Spacingd(keys='image', pixdim=(1.0, 1.0, 1.0))
+    post_trans = Compose([
+        transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HuMin, a_max=cfg.HuMax,
+                                        b_min=0.0, b_max=1.0, clip=True),
+        transforms.CropForegroundd(keys=['image'], source_key='image')
+    ])
+    for file in img_files:
         img = loader(file)
-        '''
+        tmp1 = img['image'].shape
+        org_size.append(tmp1)
 
-        x, y, z = img.shape
-        shape_x.append(x)
-        shape_y.append(y)
-        shape_z.append(z)
+        img = add_chan(img)
+        img = spa_trans(img)
+        tmp2 = img['image'].shape
+        images_size.append(tmp2[1:])  # 去掉通道维度
 
-    shape_x, shape_y, shape_z = np.array(shape_x), np.array(shape_y), np.array(shape_z)
+        img = post_trans(img)
+        tmp3 = img['image'].shape
+        foreground_size.append(tmp3[1:])  # 去掉通道维度
 
-    shape_z_median = np.median(shape_z)
-    shape_x_median = np.median(shape_x)
-    shape_y_median = np.median(shape_y)
+    org_size = np.stack(org_size)
+    org_median = np.median(org_size, axis=0)
+    info = f'原始数据的尺寸中位数：{org_median}'
+    print(info)
+    with open('./datasetsOrgInfo.txt', 'a+') as f:
+        for x in org_size:
+            x = f'{x}'
+            f.write(x + '\n')
+        f.write(info + '\n')
 
-    sorted(shape_z), sorted(shape_x), sorted(shape_y)
+    images_size = np.stack(images_size)
+    median = np.median(images_size, axis=0)
+    info = f'重采样之后的数据尺寸中位数为: {median}'
+    print(info)
+    with open('./datasetsResampleInfo.txt', 'a+') as f:
+        for x in images_size:
+            x = f'{x}'
+            f.write(x + '\n')
+        f.write(info + '\n')
 
-    with open(os.path.join(train_path, 'dataset_info'), 'w+', encoding='utf-8') as f:
-        f.write(f'Z轴中位数为：{shape_z_median}\n')
-        f.write(f'X轴中位数为：{shape_x_median}\n')
-        f.write(f'Y轴中位数为：{shape_y_median}\n')
-        f.write(f'Z轴所有shape为：{shape_z}\n')
-
-
-def arr2dict(shape):
-    m = {}
-    for x in shape:
-        try:
-            m[x] += 1
-        except Exception as e:
-            m.update({x: 1})
-    return m
-
-
-def analysis_data_pos_region():
-    shape_x, shape_y, shape_z = [], [], []
-    pixel_max, pixel_min = [], []
-    train_path = os.path.join(data_path, 'Training')
-    train_files = glob(os.path.join(train_path, 'segmentation-*.nii'))
-    for file in train_files:
-        img_tmp = LoadImage()(file)
-        img = img_tmp[0]
-        img = CropPositiveRegion()(img)
-        x, y, z = img.shape
-
-        shape_x.append(x)
-        shape_y.append(y)
-        shape_z.append(z)
-
-    shape_x, shape_y, shape_z = np.array(shape_x), np.array(shape_y), np.array(shape_z)
-    x_median, y_median, z_median = np.median(shape_x), np.median(shape_y), np.median(shape_z)
-    with open(os.path.join(train_path, 'dataset_info'), 'a+', encoding='utf-8') as f:
-        for i in range(3):
-            f.write('\n')
-        f.write(f'Z轴正向区域范围中位数为：{z_median}\n')
-        f.write(f'X轴正向区域范围中位数为：{x_median}\n')
-        f.write(f'Y轴正向区域范围中位数为：{y_median}\n')
-        f.write(f'Z轴正向区域范围为：{shape_z}\n')
-        f.write(f'X轴正向区域范围为：{shape_x}\n')
-        f.write(f'Y轴正向区域范围为：{shape_y}\n')
+    foreground_size = np.stack(foreground_size)
+    fore_median = np.median(foreground_size, axis=0)
+    info = f'前景的尺寸中位数为：{fore_median}'
+    print(info)
+    with open('./datasetForeInfo.txt', 'a+') as f:
+        for x in foreground_size:
+            x = f'{x}'
+            f.write(x + '\n')
+        f.write(info + '\n')
 
 
-# analysis_data()
-# analysis_data_pos_region()
-
-def analysis_label():
-    # train_path = os.path.join(data_path, 'Training')
-    train_path = data_path
-    train_files = glob(os.path.join(train_path, 'segmentation-*.nii'))
-    for file in train_files:
-        label_tmp = LoadImage()(file)
-        label = label_tmp[0]
-        print(np.max(label))  # 2.0
-        print(np.min(label))  # 0.0
-
-
-def analysis_data():
-    images = sorted(glob(os.path.join(data_path, 'volume-*.nii')))
-    labels = sorted(glob(os.path.join(data_path, 'segmentation-*.nii')))
-    for img_file, label_file in zip(images, labels):
-        if img_file != r'D:\Caiyimin\Dataset\LITSChallenge\volume-51.nii':
-            continue
-        img = LoadImage()(img_file)[0]
-        label = LoadImage()(label_file)[0]
-        img_shape = img.shape
-        label_shape = label.shape
-        # print(f'{img_file}********img_shape:{img_shape}**********label_shape:{label_shape}')
-        print(img_shape, '************', label_shape)
-        if img_shape != label_shape:
-            print(f'{img_file}')
-
-
-def testCropPositive(seg_path: str = os.path.join(data_path, r'Training\segmentation-0.nii')):
-    seg_img = LoadImage()(seg_path)[0]
-    seg_img = CropPositiveRegion()(seg_img)
-    print(seg_img.shape)
-
-
-# testCropPositive()
-# from LITSChallenge_SwinUnet import LITSModel, Config
-#
-# model = LITSModel()
-# shape = [1, 1] + Config.FinalShape
-# x = torch.randn(shape)
-# model.to_onnx('./SwinUnet3D.onxx', x, export_params=True, opset_version=12)
-
-analysis_label()
-# analysis_data()
+img_dicts = getImageFiles()
+countInfo(img_dicts)

@@ -1,8 +1,9 @@
 # -*-coding:utf-8-*-
 import os
+import random
 
 import torch
-from torch import nn, functional as F
+from torch import nn, functional as F, optim
 import monai
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
@@ -13,16 +14,58 @@ from monai.data import Dataset, SmartCacheDataset
 from torch.utils.data import DataLoader, random_split
 from glob import glob
 import numpy as np
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
+from torch.utils.data import random_split
+from SwinUnet_3D import swinUnet_t_3D
+from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss, FocalLoss
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.inferers import sliding_window_inference
+from monai.utils import set_determinism
+from monai.data import decollate_batch, list_data_collate
+from monai.networks.utils import one_hot
+from einops import rearrange
+from torchmetrics.functional import dice_score
+from torchmetrics import IoU, Accuracy
+from monai.transforms import (
+    Activations,
+    Activationsd,
+    AsDiscrete,
+    AsDiscreted,
+    Compose,
+    Invertd,
+    LoadImaged,
+    MapTransform,
+    NormalizeIntensityd,
+    Orientationd,
+    RandFlipd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    RandSpatialCropd,
+    Spacingd,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    EnsureType,
+    ConvertToMultiChannelBasedOnBratsClassesd,
+    SpatialPadd,
+    ScaleIntensityRangePercentilesd,
+    ScaleIntensityRanged,
+    CropForegroundd,
+    RandCropByPosNegLabeld
+)
+
+pl.seed_everything(42)
+set_determinism(42)
 
 
-class Config:
-    data_path = r'D:\Caiyimin\Dataset\MSD\Pancreas'
-    img_path = os.path.join(data_path, 'imagesTr')
-    window_center = min(30, 40)
-    window_level = max(100, 200)
-    HuMax = 250
-    HuMin = -200
+class Config(object):
+    data_path = r'D:\Caiyimin\Dataset\BTCV_Abdomen\RawData\Training'
+    img_path = os.path.join(data_path, 'img')
+    mask_path = os.path.join(data_path, 'label')
+
+    Lower = 0.5
+    Upper = 99.5
 
 
 cfg = Config()
@@ -32,6 +75,8 @@ count_transform = Compose([
     transforms.EnsureChannelFirst(),
     transforms.Spacing(pixdim=(1.0, 1.0, 1.0))
 ])
+
+img_path = cfg.img_path
 
 
 def getImageFiles():
@@ -53,8 +98,8 @@ def countInfo(img_files: [dict], images_size=resample_size):
     add_chan = transforms.AddChanneld(keys=['image'])
     spa_trans = transforms.Spacingd(keys='image', pixdim=(1.0, 1.0, 1.0))
     post_trans = Compose([
-        transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HuMin, a_max=cfg.HuMax,
-                                        b_min=0.0, b_max=1.0, clip=True),
+        transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.Lower, upper=cfg.Upper,
+                                                   b_min=0.0, b_max=1.0, clip=True),
         transforms.CropForegroundd(keys=['image'], source_key='image')
     ])
     for file in img_files:
@@ -104,3 +149,5 @@ def countInfo(img_files: [dict], images_size=resample_size):
 
 img_dicts = getImageFiles()
 countInfo(img_dicts)
+
+# -*-coding:utf-8-*-

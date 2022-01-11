@@ -28,21 +28,22 @@ class Config(object):
     window_center = min(30, 40)  # 针对CT而言的窗位和窗宽
     window_level = max(100, 200)
     HUMAX = 180
-    HUMIN = -90
+    HUMIN = -70
     LowPercent = 0.5
     HighPercent = 99.5
 
     # 数据集正向区域的shape中位数为[283,248,132]，但是FinaleShape设置为[256,256,128]加上半精度， batch=1,24G显存都不够
     in_channels = 1
-    FinalShape = [96, 96, 96]
-    window_size = [3, 3, 3]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    FinalShape = [192, 192, 160]
+    window_size = [6, 6, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     slid_window_overlap = 0.5
+
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
     NumWorkers = 0
-    n_classes = 3  # 分割总的类别数
+    n_classes = 2  # 分割总的类别数:背景+肝脏+肿瘤
     lr = 3e-4  # 学习率
-    PixDim = (2.0, 2.0, 2.0)
+    PixDim = (2.0, 2.0, 3.0)
 
     back_bone_name = 'SwinUnet3D'
 
@@ -56,6 +57,23 @@ class ObserveShape(transforms.MapTransform):
         for key in self.keys:
             print(f'\n{key}的形状为：{d[key].shape}')
             # 输入是(X,Y,Z)
+        return d
+
+
+class ConvertLabel(transforms.MapTransform):
+
+    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False):
+        super().__init__(keys, allow_missing_keys)
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            img = d[key]
+            res = []
+            res.append(np.logical_or(img == 1, img == 2))  # 将标签1和2合并成liver通道
+            res.append(img == 2)  # 将标签2合并成肿瘤通道
+            res = np.stack(res, axis=0)
+            d[key] = res
         return d
 
 
@@ -80,7 +98,7 @@ class LitsDataSet(pl.LightningDataModule):
         # train_x, train_y, test_x = self.get_init()
         train_x, train_y = self.get_init()
         for x, y in zip(train_x, train_y):
-            info = {'image': x, 'seg': y}
+            info = {'image': x, 'label': y}
             self.train_dict.append(info)
 
         # for x in test_x:
@@ -98,7 +116,7 @@ class LitsDataSet(pl.LightningDataModule):
 
     def train_dataloader(self):
         cfg = self.cfg
-        return DataLoader(self.train_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
+        return DataLoader(self.train_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=True)
 
     def val_dataloader(self):
         cfg = self.cfg
@@ -110,49 +128,49 @@ class LitsDataSet(pl.LightningDataModule):
 
     def get_preprocess(self):
         self.train_process = Compose([
-            LoadImaged(keys=['image', 'seg']),
-            transforms.EnsureChannelFirstd(keys=['image', 'seg']),
+            LoadImaged(keys=['image', 'label']),
+            transforms.EnsureChannelFirstd(keys=['image']),
+            ConvertLabel(keys='label'),
 
-            transforms.Spacingd(keys=['image', 'seg'], pixdim=self.cfg.PixDim,
+            transforms.Spacingd(keys=['image', 'label'], pixdim=self.cfg.PixDim,
                                 mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
+            transforms.Orientationd(keys=['image', 'label'], axcodes='RAS'),
 
-            transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HUMIN, a_max=cfg.HUMAX,
-                                            b_min=0.0, b_max=1.0, clip=True),  # fixme 此处是否需要指定clip参数
-            transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
+            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.LowPercent,
+                                                       upper=cfg.HighPercent, relative=True,
+                                                       b_min=0.0, b_max=1.0, clip=True),
+            transforms.ResizeWithPadOrCropd(keys=['image', 'label'], spatial_size=cfg.FinalShape),
 
-            transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=0),
-            transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=1),
-            transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=2),
+            transforms.RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
+            transforms.RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=1),
+            transforms.RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=2),
 
-            transforms.ToTensord(keys=['image', 'seg']),
+            transforms.ToTensord(keys=['image', 'label']),
 
         ])
 
         self.val_process = Compose([
-            LoadImaged(keys=['image', 'seg']),
-            transforms.EnsureChannelFirstd(keys=['image', 'seg']),
+            LoadImaged(keys=['image', 'label']),
+            transforms.EnsureChannelFirstd(keys=['image']),
+            ConvertLabel(keys='label'),
 
-            transforms.Spacingd(keys=['image', 'seg'], pixdim=self.cfg.PixDim, mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
+            transforms.Spacingd(keys=['image', 'label'], pixdim=self.cfg.PixDim, mode=['bilinear', 'nearest']),
+            transforms.Orientationd(keys=['image', 'label'], axcodes='RAS'),
 
-            transforms.ScaleIntensityRanged(keys=['image'], a_min=cfg.HUMIN, a_max=cfg.HUMAX,
-                                            b_min=0.0, b_max=1.0, clip=True),
-            transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
-
+            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.LowPercent,
+                                                       upper=cfg.HighPercent, relative=True,
+                                                       b_min=0.0, b_max=1.0, clip=True),
             # 验证集没有做空间尺寸的变换，是因为在模型的valid_step中，我们使用了滑动窗口进行推理,即函数sliding_window_inference
 
-            transforms.ToTensord(keys=['image', 'seg']),
+            transforms.ToTensord(keys=['image', 'label']),
         ])
 
     def get_init(self):
         train_x = sorted(glob(os.path.join(self.train_path, 'volume-*.nii')))
         train_y = sorted(glob(os.path.join(self.train_path, 'segmentation-*.nii')))
-        # test_x = sorted(glob(os.path.join(self.test_path, 'test-volume-*.nii')))
 
         # train_x.sort()
         # train_y.sort()
-        # test_x.sort()
 
         return train_x, train_y
 
@@ -180,12 +198,11 @@ class LITSModel(pl.LightningModule):
             from monai.networks.nets import UNETR, UNet
             self.net = UNETR(in_channels=cfg.in_channels, out_channels=cfg.n_classes, img_size=cfg.FinalShape)
 
-        self.loss_func = monai.losses.DiceFocalLoss(softmax=True, to_onehot_y=True)
-        self.post_pred = Compose([transforms.AsDiscrete(argmax=True, to_onehot=True, num_classes=cfg.n_classes)])
-        self.post_label = Compose([transforms.AsDiscrete(to_onehot=True, num_classes=cfg.n_classes)])
+        self.loss_func = monai.losses.DiceLoss(sigmoid=True)
+        self.post_pred = Compose([transforms.AsDiscrete(threshold=0.5)])
+        self.post_label = Compose([transforms.AsDiscrete(threshold=0.5)])
 
-        # 这个类有bug, 当y_pred和y均为全零矩阵时，此处计算出来的dice系数为nan
-        self.metrics = DiceMetric(include_background=True, reduction="mean")
+        self.metrics = DiceMetric(include_background=True, reduction="mean_batch")
         # self.metrics = dice_score
 
     def forward(self, x):
@@ -203,13 +220,13 @@ class LITSModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x = batch['image']
-        y = batch['seg']
-        assert x.shape == y.shape
-        y_hat = self.forward(x)
+        y = batch['label']
+        assert x.shape[2:] == y.shape[2:]
+        y_hat = self.net(x)
 
         dice_loss, dice = self.shared_step(y_hat=y_hat, y=y)
 
-        l_dice, t_dice = dice[1], dice[2]
+        l_dice, t_dice = dice[0], dice[1]
         self.log('train_loss', dice_loss, prog_bar=True)
         self.log('train_liver_dice', l_dice, prog_bar=True)
         self.log('train_tumor_dice', t_dice, prog_bar=True)
@@ -217,11 +234,11 @@ class LITSModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x = batch['image']
-        y = batch['seg']
-
+        y = batch['label']
+        assert x.shape[2:] == y.shape[2:]
         y_hat = self.forward(x)
         dice_loss, dice = self.shared_step(y_hat=y_hat, y=y)
-        l_dice, t_dice = dice[1], dice[2]
+        l_dice, t_dice = dice[0], dice[1]
         self.log('valid_loss', dice_loss, prog_bar=False)
         self.log('valid_liver_dice', l_dice, prog_bar=False)
         self.log('valid_tumor_dice', t_dice, prog_bar=True)
@@ -229,7 +246,7 @@ class LITSModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x = batch['image']
-        y = batch['seg']
+        y = batch['label']
         y_hat = self.forward(x)
         dice_loss, dice = self.shared_step(y_hat, y)
         self.log('valid_loss', dice_loss, prog_bar=False)
@@ -238,7 +255,7 @@ class LITSModel(pl.LightningModule):
 
     def training_epoch_end(self, outputs):
         mean_loss, mean_dice = self.shared_epoch_end(outputs, 'loss')
-        l_mean_dice, t_mean_dice = mean_dice[1], mean_dice[2]
+        l_mean_dice, t_mean_dice = mean_dice[0], mean_dice[1]
 
         self.log('train_mean_loss', mean_loss, prog_bar=True)
         self.log('train_mean_liver_dice', l_mean_dice, prog_bar=True)
@@ -246,7 +263,7 @@ class LITSModel(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         mean_loss, mean_dice = self.shared_epoch_end(outputs, 'loss')
-        l_mean_dice, t_mean_dice = mean_dice[1], mean_dice[2]
+        l_mean_dice, t_mean_dice = mean_dice[0], mean_dice[1]
 
         self.log('valid_mean_loss', mean_loss, prog_bar=True)
         self.log('valid_mean_liver_dice', l_mean_dice, prog_bar=True)
@@ -254,13 +271,13 @@ class LITSModel(pl.LightningModule):
 
     def test_epoch_end(self, outputs):
         mean_loss, mean_dice = self.shared_epoch_end(outputs, 'loss')
-        l_mean_dice, t_mean_dice = mean_dice[1], mean_dice[2]
+        l_mean_dice, t_mean_dice = mean_dice[0], mean_dice[1]
 
         self.log('test_mean_loss', mean_loss, prog_bar=True)
         self.log('test_mean_liver_dice', l_mean_dice, prog_bar=True)
         self.log('test_mean_tumor_dice', t_mean_dice, prog_bar=True)
 
-    def shared_epoch_end(self, outputs, loss_key, dice_key):
+    def shared_epoch_end(self, outputs, loss_key):
         losses = []
         for output in outputs:
             # loss = output['loss'].detach().cpu().numpy()
@@ -272,7 +289,7 @@ class LITSModel(pl.LightningModule):
         mean_dice = self.metrics.aggregate()
         self.metrics.reset()
 
-        mean_dice = mean_dice.detach().cpu().numy()
+        mean_dice = mean_dice.detach().cpu().numpy()
         return mean_loss, mean_dice
 
     def shared_step(self, y_hat, y):
@@ -305,7 +322,7 @@ cfg = Config()
 check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
                               save_last=False,
                               save_top_k=4, monitor='valid_mean_loss', verbose=True,
-                              filename='{epoch}-{valid_loss:.2f}-{valid_mean_dice:.2f}')
+                              filename='{epoch}-{valid_loss:.2f}-{valid_mean_tumor_dice:.2f}')
 trainer = pl.Trainer(
     progress_bar_refresh_rate=10,
     max_epochs=200,

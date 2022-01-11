@@ -17,7 +17,7 @@ from monai.config import KeysCollection
 
 
 class Config:
-    data_path = r'D:\Caiyimin\Dataset\MSD\Pancreas'
+    data_path = r'D:\Caiyimin\Dataset\MSD\Spleen'
     img_path = os.path.join(data_path, 'imagesTr')
     window_center = min(30, 40)
     window_level = max(100, 200)
@@ -104,3 +104,4 @@ def countInfo(img_files: [dict], images_size=resample_size):
 
 img_dicts = getImageFiles()
 countInfo(img_dicts)
+

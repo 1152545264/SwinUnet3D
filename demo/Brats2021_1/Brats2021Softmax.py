@@ -174,7 +174,8 @@ class Brats2021DataSet(pl.LightningDataModule):
                 ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
 
                 Orientationd(keys=["image", "label"], axcodes="RAS"),
-                Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest"), ),
+                Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0),
+                         mode=("bilinear", "nearest"), ),
 
                 # RandSpatialCropd(keys=["image", "label"], roi_size=cfg.FinalShape, random_size=False),
                 # SpatialPadd(keys=['image', 'label'], spatial_size=cfg.FinalShape),
@@ -183,7 +184,8 @@ class Brats2021DataSet(pl.LightningDataModule):
                 RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
                 RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
 
-                NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
+                NormalizeIntensityd(keys="image", nonzero=True,
+                                    channel_wise=True),
                 RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
                 RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
 
@@ -202,7 +204,8 @@ class Brats2021DataSet(pl.LightningDataModule):
                     mode=("bilinear", "nearest"),
                 ),
                 Orientationd(keys=["image", "label"], axcodes="RAS"),
-                NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
+                NormalizeIntensityd(keys="image", nonzero=True,
+                                    channel_wise=True),
                 EnsureTyped(keys=["image", "label"]),
             ]
         )
@@ -296,21 +299,34 @@ class Brats2021Model(pl.LightningModule):
         super(Brats2021Model, self).__init__()
         self.cfg = cfg
         if cfg.back_bone_name == 'SwinUnet':
-            self.net = swinUnet_t_3D(window_size=cfg.window_size, num_classes=cfg.n_classes, in_channel=cfg.in_channels)
+            self.net = swinUnet_t_3D(window_size=cfg.window_size,
+                                     num_classes=cfg.n_classes,
+                                     in_channel=cfg.in_channels)
 
         elif cfg.back_bone_name == 'Unet3D':
-            self.net = UNet(spatial_dims=3, in_channels=cfg.in_channels, out_channels=cfg.n_classes,
-                            channels=(32, 64, 128, 256, 512), strides=(2, 2, 2, 2))
+            self.net = UNet(spatial_dims=3, in_channels=cfg.in_channels,
+                            out_channels=cfg.n_classes,
+                            channels=(32, 64, 128, 256, 512),
+                            strides=(2, 2, 2, 2))
         else:
-            self.net = UNETR(in_channels=cfg.in_channels, out_channels=cfg.n_classes, img_size=cfg.RoiSize)
+            self.net = UNETR(in_channels=cfg.in_channels,
+                             out_channels=cfg.n_classes,
+                             img_size=cfg.RoiSize)
 
-        self.loss_func = DiceLoss(smooth_nr=0, smooth_dr=1e-5, squared_pred=True, to_onehot_y=False, sigmoid=True)
-        self.metrics = DiceMetric(include_background=True, reduction="mean")
-        self.post_trans = Compose([EnsureType(), Activations(sigmoid=True), AsDiscrete(threshold_values=True)])
+        self.loss_func = DiceLoss(smooth_nr=0, smooth_dr=1e-5,
+                                  squared_pred=True, to_onehot_y=False,
+                                  sigmoid=True)
+        self.metrics = DiceMetric(include_background=True,
+                                  reduction="mean")
+        self.post_trans = Compose([EnsureType(),
+                                   Activations(sigmoid=True),
+                                   AsDiscrete(threshold_values=True)])
 
     def configure_optimizers(self):
         cfg = self.cfg
-        opt = optim.AdamW(params=self.net.parameters(), lr=cfg.lr, eps=1e-7, weight_decay=1e-5)
+        opt = optim.AdamW(params=self.net.parameters(),
+                          lr=cfg.lr, eps=1e-7,
+                          weight_decay=1e-5)
 
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.LRCycle)
         return {'optimizer': opt, 'lr_scheduler': lr_scheduler, 'monitor': 'valid_mean_loss'}
@@ -318,8 +334,10 @@ class Brats2021Model(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x = batch['image']
         y = batch['label'].float()
-        y_hat = sliding_window_inference(x, roi_size=cfg.roi_size, overlap=cfg.overlap,
-                                         sw_batch_size=1, predictor=self.net)
+        y_hat = sliding_window_inference(x, roi_size=cfg.roi_size,
+                                         overlap=cfg.overlap,
+                                         sw_batch_size=1,
+                                         predictor=self.net)
 
         loss, dices = self.shared_step(y_hat, y)
         tc_dice, wt_dice, et_dice = dices[0], dices[1], dices[2]
@@ -470,9 +488,9 @@ trainer = pl.Trainer(
 
 if Config.NeedTrain:
     trainer.fit(model, data)
-    trainer.save_checkpoint('./trained_models/TrainedModel.ckpt')
+    trainer.save_checkpoint(f'./trained_models/{cfg.back_bone_name}/TrainedModel.ckpt')
 else:
-    save_path = './trained_models/SwinUnet/epoch=37-valid_loss=0.12-et_valid_mean_dice=0.81.ckpt'
+    save_path = f'./trained_models/{cfg.back_bone_name}/epoch=37-valid_loss=0.12-et_valid_mean_dice=0.81.ckpt'
 
     model = Brats2021Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
     model.eval()

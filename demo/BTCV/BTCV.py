@@ -47,12 +47,12 @@ from monai.transforms import (
     EnsureChannelFirstd,
     EnsureTyped,
     EnsureType,
-    ConvertToMultiChannelBasedOnBratsClassesd,
     SpatialPadd,
     ScaleIntensityRangePercentilesd,
     ScaleIntensityRanged,
     CropForegroundd,
-    RandCropByPosNegLabeld
+    RandCropByPosNegLabeld,
+    RandRotate90d
 )
 
 pl.seed_everything(42)
@@ -60,77 +60,44 @@ set_determinism(42)
 
 
 class Config(object):
-    data_path = r'D:\Caiyimin\Dataset\MSD\Pancreas'
-
+    data_path = r'D:\Caiyimin\Dataset\BTCV_Abdomen\RawData\Training'
+    ResamplePixDim = (1.0, 1.0, 1.5)  # 原始采样分辨率是(1.5,1.5,2.0)
+    # 采样间隔为1mm,数据尺寸中位数为[388.  388.  441.5]
     FinalShape = [160, 160, 160]
     window_size = [5, 5, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 1
+    SampleN = 2
 
-    # 数据集原始尺寸(体素间距为1.0时)中位数为(411,411,240)
-    # 体素间距为1时，z轴最小尺寸为127，最大为499
-    ResamplePixDim = (2.0, 2.0, 1.0)
-    HuMax = 50 + 350 / 2
-    HuMin = 35 - 350 / 2
     low_percent = 0.5
     upper_percent = 99.5
+    HuMin = -175.0
+    HuMax = 250.0
 
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
     NumWorkers = 0
 
-    n_classes = 2  # 括pancreas和cancer这两个通道
+    n_classes = 14  #
 
-    lr = 1e-4  # 学习率
+    lr = 3e-4  # 学习率
 
-    back_bone_name = 'SwinUnet'
-    # back_bone_name = 'Unet3D'
+    # back_bone_name = 'SwinUnet'
+    back_bone_name = 'Unet3D'
     # back_bone_name = 'UnetR'
 
     # 滑动窗口推理时使用
     roi_size = FinalShape
-    slid_window_overlap = 0.5
+    slid_window_overlap = 0.25
+
+    check_val_every_n_epoch = 20  # 多少个epoch进行验证集测试一次
 
 
-class ObserveShape(transforms.MapTransform):
-    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False):
-        super(ObserveShape, self).__init__(keys, allow_missing_keys)
-
-    def __call__(self, data):
-        d = dict(data)
-        for key in self.keys:
-            print(d[key].shape)
-            # 输入是(X,Y,Z)
-        return d
-
-
-class ConvertLabeld(transforms.MapTransform):
-    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False):
-        super(ConvertLabeld, self).__init__(keys, allow_missing_keys)
-
-    def __call__(self, data):
-        d = dict(data)
-        for key in self.keys:
-            img = d[key]
-            res = []
-            # 将 tumor和pancreas合并成pancreas
-            res.append(np.logical_or(img == 1, img == 2))
-            res.append(img == 2)  # tumor通道
-
-            res = np.stack(res, axis=0)
-            # res = np.concatenate(res, axis=0)
-            res = res.astype(np.float)
-            d[key] = res
-        return d
-
-
-class LitsDataSet(pl.LightningDataModule):
+class BTCVDataset(pl.LightningDataModule):
     def __init__(self, cfg=Config()):
-        super(LitsDataSet, self).__init__()
+        super(BTCVDataset, self).__init__()
         self.cfg = cfg
-        self.data_path = cfg.data_path
-        self.train_path = os.path.join(cfg.data_path, 'imagesTr')
-        self.label_tr_path = os.path.join(cfg.data_path, 'labelsTr')
-        self.test_path = os.path.join(cfg.data_path, 'imagesTs')
+        self.image_path = os.path.join(cfg.data_path, 'img')
+        self.label_path = os.path.join(cfg.data_path, 'label')
 
         self.train_dict = []
         self.val_dict = []
@@ -144,19 +111,16 @@ class LitsDataSet(pl.LightningDataModule):
         self.val_process = None
 
     def prepare_data(self):
-        train_x, train_y, test_x = self.get_init()
-        for x, y in zip(train_x, train_y):
+        images, labels = self.get_init()
+        for x, y in zip(images, labels):
             info = {'image': x, 'label': y}
             self.train_dict.append(info)
 
-        for x in test_x:
-            info = {'image': x}
-            self.test_dict.append(info)
+        self.split_dataset()
         self.get_preprocess()
 
     # 划分训练集，验证集，测试集以及定义数据预处理和增强，
     def setup(self, stage=None) -> None:
-        self.split_dataset()
         self.train_set = Dataset(self.train_dict, transform=self.train_process)
         self.val_set = Dataset(self.val_dict, transform=self.val_process)
         self.test_set = Dataset(self.test_dict, transform=self.val_process)
@@ -165,22 +129,23 @@ class LitsDataSet(pl.LightningDataModule):
         cfg = self.cfg
         return DataLoader(self.train_set, batch_size=cfg.BatchSize,
                           num_workers=cfg.NumWorkers,
-                          collate_fn=list_data_collate)
+                          collate_fn=list_data_collate,
+                          shuffle=True)
 
     def val_dataloader(self):
         cfg = self.cfg
         return DataLoader(self.val_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
 
     def test_dataloader(self):
-        cfg = self.cfg
-        return DataLoader(self.test_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
+        # cfg = self.cfg
+        # return DataLoader(self.test_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
+        pass
 
     def get_preprocess(self):
         cfg = self.cfg
         self.train_process = Compose([
             LoadImaged(keys=['image', 'label']),
-            EnsureChannelFirstd(keys=['image']),
-            ConvertLabeld(keys='label'),
+            EnsureChannelFirstd(keys=['image', 'label']),
 
             Spacingd(keys=['image', 'label'], pixdim=cfg.ResamplePixDim,
                      mode=('bilinear', 'nearest')),
@@ -188,25 +153,30 @@ class LitsDataSet(pl.LightningDataModule):
 
             ScaleIntensityRanged(keys='image', a_min=cfg.HuMin, a_max=cfg.HuMax,
                                  b_min=0.0, b_max=1.0, clip=True),
-            SpatialPadd(keys=['image', 'label'], spatial_size=cfg.FinalShape),
-            RandCropByPosNegLabeld(keys=['image', 'label'], label_key='label',
-                                   spatial_size=cfg.FinalShape,
-                                   pos=1, neg=1, num_samples=1, image_key='image', ),
+            # ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.low_percent,
+            #                                 upper=cfg.upper_percent, b_max=1.0,
+            #                                 b_min=0.0, clip=True),
 
-            RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
-            RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=1),
-            RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=2),
+            # CropForegroundd(keys=['image', 'label'], source_key='image'),
+            RandCropByPosNegLabeld(
+                keys=["image", "label"], label_key="label",
+                spatial_size=cfg.FinalShape, pos=1, neg=1,
+                num_samples=cfg.SampleN, image_key="image", ),
 
-            RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
+            RandFlipd(keys=['image', 'label'], prob=0.1, spatial_axis=0),
+            RandFlipd(keys=['image', 'label'], prob=0.1, spatial_axis=1),
+            RandFlipd(keys=['image', 'label'], prob=0.1, spatial_axis=2),
+            RandRotate90d(keys=['image', 'label'], prob=0.1, max_k=3),
+
+            RandScaleIntensityd(keys='image', factors=0.1, prob=0.1),
+            RandShiftIntensityd(keys='image', offsets=0.1, prob=0.5),
+
             EnsureTyped(keys=['image', 'label']),
-
         ])
 
         self.val_process = Compose([
             LoadImaged(keys=['image', 'label']),
-
-            EnsureChannelFirstd(keys=['image']),
-            ConvertLabeld(keys='label'),
+            EnsureChannelFirstd(keys=['image', 'label']),
 
             Spacingd(keys=['image', 'label'], pixdim=cfg.ResamplePixDim,
                      mode=('bilinear', 'nearest')),
@@ -214,17 +184,18 @@ class LitsDataSet(pl.LightningDataModule):
 
             ScaleIntensityRanged(keys='image', a_min=cfg.HuMin, a_max=cfg.HuMax,
                                  b_min=0.0, b_max=1.0, clip=True),
+
             # CropForegroundd(keys=['image', 'label'], source_key='image'),
 
             EnsureTyped(keys=['image', 'label']),
         ])
 
     def get_init(self):
-        train_x = sorted(glob(os.path.join(self.train_path, '*.nii.gz')))
-        train_y = sorted(glob(os.path.join(self.label_tr_path, '*.nii.gz')))
-        test_x = sorted(glob(os.path.join(self.test_path, '*.nii.gz')))
-
-        return train_x, train_y, test_x
+        images = glob(os.path.join(self.image_path, '*nii.gz'))
+        labels = glob(os.path.join(self.label_path, '*nii.gz'))
+        images.sort()
+        labels.sort()
+        return images, labels
 
     def split_dataset(self):
         cfg = self.cfg
@@ -240,9 +211,9 @@ class LitsDataSet(pl.LightningDataModule):
             = random_split(self.train_dict, [train_num, val_num, test_num])
 
 
-class Lung(pl.LightningModule):
+class BTCV(pl.LightningModule):
     def __init__(self, cfg=Config()):
-        super(Lung, self).__init__()
+        super(BTCV, self).__init__()
         self.cfg = cfg
         if cfg.back_bone_name == 'SwinUnet':
             self.net = swinUnet_t_3D(window_size=cfg.window_size,
@@ -260,15 +231,17 @@ class Lung(pl.LightningModule):
                                 channels=(32, 64, 128, 256, 512),
                                 strides=(2, 2, 2, 2))
 
-        self.loss_func = DiceLoss(smooth_nr=0, smooth_dr=1e-5,
-                                  squared_pred=False,
-                                  sigmoid=True)
-
-        self.metrics = DiceMetric(include_background=True,
-                                  reduction='mean_batch')
+        self.loss_func = DiceCELoss(to_onehot_y=True, softmax=True)
+        self.metrics = DiceMetric(include_background=False,
+                                  reduction='mean_batch',
+                                  get_not_nans=False)
         self.post_pred = Compose([
-            EnsureType(), Activations(sigmoid=True),
-            AsDiscrete(threshold_values=True)
+            EnsureType(),
+            AsDiscrete(argmax=True, to_onehot=True, num_classes=cfg.n_classes)
+        ])
+        self.post_label = Compose([
+            EnsureType(),
+            AsDiscrete(to_onehot=True, num_classes=cfg.n_classes)
         ])
 
     def configure_optimizers(self):
@@ -276,27 +249,20 @@ class Lung(pl.LightningModule):
         opt = optim.AdamW(params=self.parameters(), lr=cfg.lr, eps=1e-7,
                           weight_decay=1e-5)
 
-        # lr_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        #     opt, T_0=5, T_mult=1, )
-        # return {'optimizer': opt, 'lr_scheduler': lr_scheduler, 'monitor': 'valid_loss'}
+        lr_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            opt, T_0=5, T_mult=30, )
+        return {'optimizer': opt, 'lr_scheduler': lr_scheduler, 'monitor': 'valid_epoch_mean_loss'}
 
-        return opt
+        # return opt
 
     def training_step(self, batch, batch_idx):
 
         x = batch['image']
         y = batch['label']
-        # y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape,
-        #                                  sw_batch_size=cfg.BatchSize,
-        #                                  predictor=self.net,
-        #                                  overlap=cfg.slid_window_overlap)
         y_hat = self.net(x)
-
-        loss, dice = self.shared_step(y_hat=y_hat, y=y)
-        p_dice, t_dice = dice[0], dice[1]
+        loss, mean_dice = self.shared_step(y_hat=y_hat, y=y)
+        self.log('train_mean_dice', mean_dice, prog_bar=True)
         self.log('train_loss', loss, prog_bar=True)
-        self.log('train_pancreas_dice', p_dice, prog_bar=True)
-        self.log('train_tumor_dice', t_dice, prog_bar=True)
         return {'loss': loss}
 
     def validation_step(self, batch, batch_idx):
@@ -305,11 +271,9 @@ class Lung(pl.LightningModule):
         y = batch['label']
         y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize, predictor=self.net,
                                          overlap=cfg.slid_window_overlap)
-        loss, dice = self.shared_step(y_hat=y_hat, y=y)
-        p_dice, t_dice = dice[0], dice[1]
+        loss, mean_dice = self.shared_step(y_hat=y_hat, y=y)
+        self.log('valid_mean_dice', mean_dice, prog_bar=True)
         self.log('valid_loss', loss, prog_bar=True)
-        self.log('valid_pancreas_dice', p_dice, prog_bar=True)
-        self.log('valid_tumor_dice', t_dice, prog_bar=True)
         return {'loss': loss}
 
     def test_step(self, batch, batch_idx):
@@ -319,33 +283,25 @@ class Lung(pl.LightningModule):
         y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=1, predictor=self.net,
                                          overlap=cfg.slid_window_overlap)
 
-        loss, dice = self.shared_step(y_hat=y_hat, y=y)
-        p_dice, t_dice = dice[0], dice[1]
-        self.log('test_loss', loss, prog_bar=True)
-        self.log('test_pancreas_dice', p_dice, prog_bar=True)
-        self.log('test_tumor_dice', t_dice, prog_bar=True)
+        loss, mean_dice = self.shared_step(y_hat=y_hat, y=y)
+        self.log('valid_mean_dice', mean_dice, prog_bar=True)
+        self.log('valid_loss', loss, prog_bar=True)
         return {'loss': loss}
 
     def training_epoch_end(self, outputs):
-        losses, dice = self.shared_epoch_end(outputs, 'loss')
-        p_dice, t_dice = dice[0], dice[1]
-        self.log('train_mean_loss', losses, prog_bar=True)
-        self.log('train_mean_pancreas_dice', p_dice, prog_bar=True)
-        self.log('train_mean_tumor_dice', t_dice, prog_bar=True)
+        losses, mean_dice = self.shared_epoch_end(outputs, 'loss')
+        self.log('train_epoch_mean_dice', mean_dice, prog_bar=True)
+        self.log('train_epoch_mean_loss', losses, prog_bar=True)
 
     def validation_epoch_end(self, outputs):
-        losses, dice = self.shared_epoch_end(outputs, 'loss')
-        p_dice, t_dice = dice[0], dice[1]
-        self.log('valid_mean_loss', losses, prog_bar=True)
-        self.log('valid_mean_pancreas_dice', p_dice, prog_bar=True)
-        self.log('valid_mean_tumor_dice', t_dice, prog_bar=True)
+        losses, mean_dice = self.shared_epoch_end(outputs, 'loss')
+        self.log('valid_epoch_mean_dice', mean_dice, prog_bar=True)
+        self.log('valid_epoch_mean_loss', losses, prog_bar=True)
 
     def test_epoch_end(self, outputs):
-        losses, dice = self.shared_epoch_end(outputs, 'loss')
-        p_dice, t_dice = dice[0], dice[1]
-        self.log('valid_mean_loss', losses, prog_bar=True)
-        self.log('valid_mean_pancreas_dice', p_dice, prog_bar=True)
-        self.log('valid_mean_tumor_dice', t_dice, prog_bar=True)
+        losses, mean_dice = self.shared_epoch_end(outputs, 'loss')
+        self.log('test_epoch_mean_dice', mean_dice, prog_bar=True)
+        self.log('test_epoch_mean_loss', losses, prog_bar=True)
 
     def shared_epoch_end(self, outputs, loss_key):
         losses = []
@@ -359,42 +315,47 @@ class Lung(pl.LightningModule):
 
         dice = self.metrics.aggregate()
         self.metrics.reset()
+        dice = torch.mean(dice)
 
         dice = dice.detach().cpu().numpy()
         return losses, dice
 
     def shared_step(self, y_hat, y):
+        assert y_hat.shape[2:] == y.shape[2:]
         loss = self.loss_func(y_hat, y)
 
         y_hat = [self.post_pred(it) for it in decollate_batch(y_hat)]
-        y = decollate_batch(y)
+        y = [self.post_label(it) for it in decollate_batch(y)]
 
         dice = self.metrics(y_hat, y)
 
         dice = torch.nan_to_num(dice)
         loss = torch.nan_to_num(loss)
 
-        dice = torch.mean(dice, dim=0)
+        counts = torch.count_nonzero(dice)
+        if counts == 0:
+            counts = counts + 1e-5
+        dice = torch.sum(dice) / counts
         return loss, dice
 
 
-data = LitsDataSet()
-model = Lung()
+data = BTCVDataset()
+model = BTCV()
 
 early_stop = EarlyStopping(
-    monitor='valid_mean_loss',
+    monitor='valid_epoch_mean_loss',
     patience=10,
 )
 
 cfg = Config()
 check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
                               save_last=False,
-                              save_top_k=2, monitor='valid_mean_loss', verbose=True,
-                              filename='{epoch}-{valid_loss:.2f}-{valid_mean_dice:.2f}')
+                              save_top_k=2, monitor='valid_epoch_mean_loss', verbose=True,
+                              filename='{epoch}-{valid_loss:.2f}-{valid_epoch_mean_dice:.2f}')
 trainer = pl.Trainer(
     progress_bar_refresh_rate=10,
-    max_epochs=400,
-    min_epochs=30,
+    max_epochs=5000,
+    min_epochs=600,
     gpus=1,
     # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
 
@@ -406,6 +367,8 @@ trainer = pl.Trainer(
     accumulate_grad_batches=4,
     num_sanity_val_steps=0,
     log_every_n_steps=10,
-    auto_lr_find=True
+    auto_lr_find=True,
+    gradient_clip_val=0.5,
+    check_val_every_n_epoch=cfg.check_val_every_n_epoch,
 )
 trainer.fit(model, data)
