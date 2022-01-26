@@ -64,7 +64,7 @@ class Config(object):
     n_classes = 3  # 分割总的类别数，在三个通道上分别进行前景和背景的分割，三个通道为：TC（肿瘤核心）、WT（整个肿瘤）和ET（肿瘤增强)。
 
     lr = 3e-4  # 学习率
-    back_bone_name = 'Unet3D'
+    back_bone_name = 'Unet3D_0'
 
     # 滑动窗口推理时使用
     roi_size = [224, 224, 128]
@@ -220,7 +220,7 @@ class LITSModel(pl.LightningModule):
     def __init__(self, cfg=Config()):
         super(LITSModel, self).__init__()
         self.cfg = cfg
-        if cfg.back_bone_name == 'SwinUnet':
+        if cfg.back_bone_name == 'SwinUnet_0':
             self.net = swinUnet_t_3D(window_size=cfg.window_size, num_classes=cfg.n_classes, in_channel=cfg.in_channels,
                                      flatten_dim=256)
         else:

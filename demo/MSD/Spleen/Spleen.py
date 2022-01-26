@@ -52,8 +52,8 @@ class Config(object):
 
     lr = 1e-4  # 学习率
 
-    back_bone_name = 'SwinUnet'
-    # back_bone_name = 'Unet3D'
+    back_bone_name = 'SwinUnet_0'
+    # back_bone_name = 'Unet3D_0'
     # back_bone_name = 'UnetR'
 
     # 滑动窗口推理时使用
@@ -185,7 +185,7 @@ class Lung(pl.LightningModule):
     def __init__(self, cfg=Config()):
         super(Lung, self).__init__()
         self.cfg = cfg
-        if cfg.back_bone_name == 'SwinUnet':
+        if cfg.back_bone_name == 'SwinUnet_0':
             self.net = swinUnet_t_3D(window_size=cfg.window_size, num_classes=cfg.n_classes, in_channel=cfg.in_channels,
                                      )
         else:

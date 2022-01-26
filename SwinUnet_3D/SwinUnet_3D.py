@@ -80,19 +80,21 @@ class PreNorm3D(nn.Module):
 
 
 class FeedForward3D(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout: float = 0.1):
+    def __init__(self, dim, hidden_dim, dropout: float = 0.0):
         super().__init__()
         self.fc1 = nn.Linear(dim, hidden_dim)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, dim)
         self.drop = nn.Dropout(dropout)
+        self.drop_ratio = dropout
 
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
-        x = self.drop(x)
+        if self.drop_ratio > 0:
+            x = self.drop(x)
         return x
 
 
@@ -256,7 +258,7 @@ class WindowAttention3D(nn.Module):
 
 class SwinBlock3D(nn.Module):
     def __init__(self, dim, heads, head_dim, mlp_dim, shifted, window_size: Union[int, List[int]],
-                 relative_pos_embedding, dropout: float = 0.1):
+                 relative_pos_embedding, dropout: float = 0.0):
         super().__init__()
         self.attention_block = Residual3D(PreNorm3D(dim, WindowAttention3D(dim=dim,
                                                                            heads=heads,
@@ -281,7 +283,6 @@ class PatchMerging3D(nn.Module):
 
         self.dsf = downscaling_factor  # 2 或者 4
         self.hidden_dim = (downscaling_factor ** 3) * in_dims
-        self.norm = nn.LayerNorm(self.hidden_dim)
         self.patch_merge = nn.Linear(self.hidden_dim, out_dims)
 
     def forward(self, x):
@@ -289,7 +290,6 @@ class PatchMerging3D(nn.Module):
         dsf = self.dsf
         x = rearrange(x, 'b c (x_ns x_dsf) (y_ns y_dsf) (z_ns z_dsf) -> b x_ns y_ns z_ns (x_dsf y_dsf z_dsf c)',
                       x_dsf=dsf, y_dsf=dsf, z_dsf=dsf)
-        x = self.norm(x)
         x = self.patch_merge(x)
         return x  # b,  w_x //down_scaling, w_y//down_scaling, w_z//down_scaling, out_dim
 
@@ -312,7 +312,7 @@ X* down_scaling, Y*down_scaling,Z*down_scaling, out_dims
 
 
 class PatchExpand3D(nn.Module):
-    def __init__(self, in_dim, out_dim, up_scaling_factor, dropout: float = 0.1):
+    def __init__(self, in_dim, out_dim, up_scaling_factor):
         super(PatchExpand3D, self).__init__()
         self.in_dims = in_dim
         self.out_dims = out_dim
@@ -322,14 +322,11 @@ class PatchExpand3D(nn.Module):
         # X, Y, Z, out_dims -> X, Y, Z, (down_scaling ** 3) * out_dims
         fc_dim = (up_scaling_factor ** 3) * out_dim
         self.c_up = nn.Linear(in_dim, fc_dim)
-        self.norm = nn.LayerNorm(in_dim)
 
     def forward(self, x):
         '''X: B,C,X,Y,Z'''
         x = rearrange(x, 'b c x_s y_s z_s -> b x_s y_s z_s c')
-        x = self.norm(x)
         x = self.c_up(x)
-
         x = rearrange(x, 'b x_s y_s z_s (fac1 fac2 fac3 c) -> b  (x_s fac1) (y_s fac2) (z_s fac3) c',
                       fac1=self.usf, fac2=self.usf, fac3=self.usf)
         return x
@@ -337,7 +334,7 @@ class PatchExpand3D(nn.Module):
 
 class StageModuleDownScaling3D(nn.Module):
     def __init__(self, in_dims, hidden_dimension, layers, downscaling_factor, num_heads, head_dim,
-                 window_size: Union[int, List[int]], relative_pos_embedding, dropout: float = 0.1):
+                 window_size: Union[int, List[int]], relative_pos_embedding, dropout: float = 0.0):
         super().__init__()
         assert layers % 2 == 0, 'Stage layers need to be divisible by 2 for regular and shifted block.'
 
@@ -368,7 +365,7 @@ class StageModuleDownScaling3D(nn.Module):
 
 class StageModuleUpScaling3D(nn.Module):
     def __init__(self, in_dims, hidden_dimension, layers, up_scaling_factor, num_heads, head_dim,
-                 window_size: Union[int, List[int]], relative_pos_embedding):
+                 window_size: Union[int, List[int]], relative_pos_embedding, dropout: float = 0.0):
         super().__init__()
         assert layers % 2 == 0, 'Stage layers need to be divisible by 2 for regular and shifted block.'
 
@@ -379,9 +376,11 @@ class StageModuleUpScaling3D(nn.Module):
         for _ in range(layers // 2):
             self.layers.append(nn.ModuleList([
                 SwinBlock3D(dim=hidden_dimension, heads=num_heads, head_dim=head_dim, mlp_dim=hidden_dimension * 4,
-                            shifted=False, window_size=window_size, relative_pos_embedding=relative_pos_embedding),
+                            shifted=False, window_size=window_size, relative_pos_embedding=relative_pos_embedding,
+                            dropout=dropout),
                 SwinBlock3D(dim=hidden_dimension, heads=num_heads, head_dim=head_dim, mlp_dim=hidden_dimension * 4,
-                            shifted=True, window_size=window_size, relative_pos_embedding=relative_pos_embedding),
+                            shifted=True, window_size=window_size, relative_pos_embedding=relative_pos_embedding,
+                            dropout=dropout),
             ]))
 
     def forward(self, x):
@@ -419,7 +418,7 @@ class Converge(nn.Module):
 class SwinUnet3D(nn.Module):
     def __init__(self, *, hidden_dim, layers, heads, in_channel=1, num_classes=2, head_dim=32,
                  window_size: Union[int, List[int]] = 7, downscaling_factors=(4, 2, 2, 2),
-                 relative_pos_embedding=True, dropout: float = 0.1):
+                 relative_pos_embedding=True, dropout: float = 0.0):
         super().__init__()
 
         self.dsf = downscaling_factors
@@ -427,41 +426,40 @@ class SwinUnet3D(nn.Module):
 
         self.down_stage1 = StageModuleDownScaling3D(in_dims=in_channel, hidden_dimension=hidden_dim, layers=layers[0],
                                                     downscaling_factor=downscaling_factors[0], num_heads=heads[0],
-                                                    head_dim=head_dim, window_size=window_size,
+                                                    head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                     relative_pos_embedding=relative_pos_embedding)
         self.down_stage2 = StageModuleDownScaling3D(in_dims=hidden_dim, hidden_dimension=hidden_dim * 2,
                                                     layers=layers[1],
                                                     downscaling_factor=downscaling_factors[1], num_heads=heads[1],
-                                                    head_dim=head_dim, window_size=window_size,
+                                                    head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                     relative_pos_embedding=relative_pos_embedding)
         self.down_stage3 = StageModuleDownScaling3D(in_dims=hidden_dim * 2, hidden_dimension=hidden_dim * 4,
                                                     layers=layers[2],
                                                     downscaling_factor=downscaling_factors[2], num_heads=heads[2],
-                                                    head_dim=head_dim, window_size=window_size,
+                                                    head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                     relative_pos_embedding=relative_pos_embedding)
         self.down_stage4 = StageModuleDownScaling3D(in_dims=hidden_dim * 4, hidden_dimension=hidden_dim * 8,
                                                     layers=layers[3],
                                                     downscaling_factor=downscaling_factors[3], num_heads=heads[3],
-                                                    head_dim=head_dim, window_size=window_size,
+                                                    head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                     relative_pos_embedding=relative_pos_embedding)
 
         self.up_stage1 = StageModuleUpScaling3D(in_dims=hidden_dim * 8, hidden_dimension=hidden_dim * 4,
                                                 layers=layers[3],
                                                 up_scaling_factor=downscaling_factors[3], num_heads=heads[3],
-                                                head_dim=head_dim, window_size=window_size,
+                                                head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                 relative_pos_embedding=relative_pos_embedding)
 
         self.up_stage2 = StageModuleUpScaling3D(in_dims=hidden_dim * 4, hidden_dimension=hidden_dim * 2,
                                                 layers=layers[2],
                                                 up_scaling_factor=downscaling_factors[2], num_heads=heads[2],
-                                                head_dim=head_dim, window_size=window_size,
+                                                head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                 relative_pos_embedding=relative_pos_embedding)
 
         self.up_stage3 = StageModuleUpScaling3D(in_dims=hidden_dim * 2, hidden_dimension=hidden_dim,
                                                 layers=layers[1],
                                                 up_scaling_factor=downscaling_factors[1], num_heads=heads[1],
-                                                head_dim=head_dim, window_size=window_size,
-
+                                                head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                 relative_pos_embedding=relative_pos_embedding)
 
         self.converge1 = Converge(hidden_dim * 8, hidden_dim * 4)  # 用于融合upstage和对应的downstage输出的特征，下同

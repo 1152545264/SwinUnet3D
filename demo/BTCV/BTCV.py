@@ -79,7 +79,7 @@ class Config(object):
 
     n_classes = 14  #
 
-    lr = 3e-4  # 学习率
+    lr = 1e-4  # 学习率
 
     # back_bone_name = 'SwinUnet'
     back_bone_name = 'Unet3D'
@@ -90,6 +90,7 @@ class Config(object):
     slid_window_overlap = 0.25
 
     check_val_every_n_epoch = 20  # 多少个epoch进行验证集测试一次
+    patience = 10
 
 
 class BTCVDataset(pl.LightningDataModule):
@@ -339,15 +340,16 @@ class BTCV(pl.LightningModule):
         return loss, dice
 
 
+cfg = Config()
+
 data = BTCVDataset()
 model = BTCV()
 
 early_stop = EarlyStopping(
     monitor='valid_epoch_mean_loss',
-    patience=10,
+    patience=cfg.patience,
 )
 
-cfg = Config()
 check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
                               save_last=False,
                               save_top_k=2, monitor='valid_epoch_mean_loss', verbose=True,
@@ -355,7 +357,7 @@ check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
 trainer = pl.Trainer(
     progress_bar_refresh_rate=10,
     max_epochs=5000,
-    min_epochs=600,
+    min_epochs=1300,
     gpus=1,
     # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
 

@@ -84,8 +84,8 @@ class Config(object):
 
     lr = 3e-4  # 学习率
     # back_bone_name = 'SwinUnet'
-    back_bone_name = 'Unet3D'
-    # back_bone_name = 'UNetR'
+    # back_bone_name = 'Unet3D_0'
+    back_bone_name = 'UNetR'
 
     # 滑动窗口推理时使用
     roi_size = RoiSize
@@ -303,7 +303,7 @@ class Brats2021Model(pl.LightningModule):
                                      num_classes=cfg.n_classes,
                                      in_channel=cfg.in_channels)
 
-        elif cfg.back_bone_name == 'Unet3D':
+        elif cfg.back_bone_name == 'Unet3D_0':
             self.net = UNet(spatial_dims=3, in_channels=cfg.in_channels,
                             out_channels=cfg.n_classes,
                             channels=(32, 64, 128, 256, 512),

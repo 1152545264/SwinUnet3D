@@ -52,7 +52,7 @@ class Config(object):
     n_classes = 3  # 分割总的类别数，在三个通道上分别进行前景和背景的分割，三个通道为：TC（肿瘤核心）、ET（肿瘤增强)和WT（整个肿瘤）。
 
     lr = 3e-4  # 学习率
-    back_bone_name = 'SwinUnet'
+    back_bone_name = 'SwinUnet_0'
 
     # 滑动窗口推理时使用
     roi_size = FinalShape
