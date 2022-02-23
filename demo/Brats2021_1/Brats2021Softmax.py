@@ -1,16 +1,12 @@
 # -*-coding:utf-8-*-
 import os
-import random
 
 import torch
 from torch import nn, functional as F, optim
 import monai
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
 from monai import transforms
-from monai.transforms import Compose
-from monai.transforms import LoadImaged, LoadImage
-from monai.data import Dataset, SmartCacheDataset
+from monai.data import Dataset
 from torch.utils.data import DataLoader, random_split
 from glob import glob
 import numpy as np
@@ -18,15 +14,16 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
 from torch.utils.data import random_split
+
 from SwinUnet_3D import swinUnet_t_3D
 from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss
-from monai.metrics import DiceMetric
-from torchmetrics.functional import dice_score
-from monai.networks.utils import one_hot
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
+from monai.networks.nets import UNETR, UNet, SegResNet, DiNTS  # , DynUNet
+from monai.networks.nets import TopologySearch
 from monai.transforms import (
     Activations,
     Activationsd,
@@ -50,7 +47,6 @@ from monai.transforms import (
     SpatialPadd,
     ScaleIntensityRangePercentilesd,
 )
-from monai.networks.nets import UNETR, UNet
 
 pl.seed_everything(42)
 set_determinism(42)
@@ -83,20 +79,52 @@ class Config(object):
     n_classes = 3  # 分割总的类别数，在三个通道上分别进行前景和背景的分割，三个通道为：TC（肿瘤核心）、ET（肿瘤增强)和WT（整个肿瘤）。
 
     lr = 3e-4  # 学习率
-    # back_bone_name = 'SwinUnet'
-    # back_bone_name = 'Unet3D_0'
-    back_bone_name = 'UNetR'
 
     # 滑动窗口推理时使用
     roi_size = RoiSize
     overlap = 0.0
 
+    # model_name = 'SwinUnet'
+    # model_name = 'Unet3D'
+    # model_name = 'VNet'
+    # model_name = 'DynUNet'
+    model_name = 'SegResNet'
+    # model_name = 'DiNTS'
+    # model_name = 'UNetR'
+
+    ModelDict = {}
+    ArgsDict = {}
+
+    ModelDict['Unet3D'] = UNet
+    ArgsDict['Unet3D'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes,
+                          'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
+
+    ModelDict['VNet'] = VNet
+    ArgsDict['VNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, 'dropout_prob': 0.0,
+                        'act': ("prelu", {})}
+
+    # TODO 添加DynUNet，SegResNet和DiNTS的参数配置
+    # ModelDict['DynUNet'] = DynUNet
+    # ArgsDict['DynUNet'] = {}
+
+    ModelDict['SegResNet'] = SegResNet
+    ArgsDict['SegResNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, }
+
+    ModelDict['DiNTS'] = DiNTS
+    ArgsDict['DiNTS'] = {'dints_space': TopologySearch(), 'in_channels': in_channels, 'num_classes': n_classes, }
+
+    ModelDict['UNetR'] = UNETR
+    ArgsDict['UNetR'] = {'in_channels': in_channels, 'out_channels': n_classes, 'img_size': RoiSize}
+
+    ModelDict['SWinUnet'] = swinUnet_t_3D
+    ArgsDict['SWinUNet'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
+
     # NeedTrain = False
     NeedTrain = True
     SaveTrainPred = True
     data_path = r'D:\Caiyimin\Dataset\Brats2021'
-    predDir = r'D:\Caiyimin\Dataset\Brats2021\Brats2021Valid'
-    PredSavePath = r'D:\Caiyimin\Dataset\Brats2021\Brats2021' + r'ValidSeg' + back_bone_name
+    ValidSegDir = os.path.join(data_path, 'ValidSeg', model_name)
+    PredSegDir = os.path.join(data_path, 'PredSeg', model_name)
 
 
 class ObserveShape(transforms.MapTransform):
@@ -109,6 +137,66 @@ class ObserveShape(transforms.MapTransform):
             print(d[key].shape)
             # 输入是(X,Y,Z)
         return d
+
+
+class ReverseBratsLabel(transforms.Transform):
+    def __call__(self, pred):
+        if isinstance(pred, torch.Tensor):
+            pred = pred.numpy()
+        pred = pred.astype(np.bool)
+        tc = pred[0, ::]
+        wt = pred[1, ::]
+        et = pred[2, ::]
+        res = np.zeros(pred.shape[1:])
+
+        # label_4 = et
+        # label_2 = wt - tc
+        # label_1 = tc - et
+
+        label_4 = et
+        label_2 = np.logical_and(wt, np.logical_not(tc))
+        label_1 = np.logical_and(tc, np.logical_not(et))
+
+        res[label_1] = 1
+        res[label_2] = 2
+        res[label_4] = 4
+        return res
+
+
+def ReverseBratsClassFromMultiChannel(pred):
+    '''
+    # merge labels 1 (tumor non-enh) and 4 (tumor enh) to TC
+    result.append(np.logical_or(img == 1, img == 4))
+    # merge labels 1 (tumor non-enh) and 4 (tumor enh) and 2 (large edema) to WT
+    result.append(np.logical_or(np.logical_or(img == 1, img == 4), img == 2))
+    # label 4 is ET
+    result.append(img == 4)
+    '''
+    pred = pred.astype(np.bool)
+    tc = pred[0, ::]
+    wt = pred[1, ::]
+    et = pred[2, ::]
+    res = np.zeros(pred.shape[1:])
+
+    # label_4 = et
+    # label_2 = wt - tc
+    # label_1 = tc - et
+
+    label_4 = et
+    label_2 = np.logical_and(wt, np.logical_not(tc))
+    label_1 = np.logical_and(tc, np.logical_not(et))
+
+    res[label_1] = 1
+    res[label_2] = 2
+    res[label_4] = 4
+    return res
+
+
+def save_pred(pred, predSavePath):
+    pred = pred.detach().cpu().numpy()
+
+    pred2 = ReverseBratsLabel()(pred)
+    write_nifti(pred2, file_name=predSavePath)
 
 
 class Brats2021DataSet(pl.LightningDataModule):
@@ -127,8 +215,8 @@ class Brats2021DataSet(pl.LightningDataModule):
         self.train_process = None
         self.val_process = None
 
-        self.pred_dir = cfg.predDir
-        self.predSaveDir = cfg.PredSavePath
+        self.pred_dir = cfg.PredSegDir
+        self.predSaveDir = cfg.ValidSegDir
         self.pred_files = []
         self.pred_set = None
         self.test_transforms = None
@@ -258,69 +346,24 @@ class Brats2021DataSet(pl.LightningDataModule):
         self.train_dict, self.val_dict = random_split(self.train_dict, [train_num, val_num])
 
 
-def ReverseBratsClassFromMultiChannel(pred):
-    '''
-    # merge labels 1 (tumor non-enh) and 4 (tumor enh) to TC
-    result.append(np.logical_or(img == 1, img == 4))
-    # merge labels 1 (tumor non-enh) and 4 (tumor enh) and 2 (large edema) to WT
-    result.append(np.logical_or(np.logical_or(img == 1, img == 4), img == 2))
-    # label 4 is ET
-    result.append(img == 4)
-    '''
-    pred = pred.astype(np.bool)
-    tc = pred[0, ::]
-    wt = pred[1, ::]
-    et = pred[2, ::]
-    res = np.zeros(pred.shape[1:])
-
-    # label_4 = et
-    # label_2 = wt - tc
-    # label_1 = tc - et
-
-    label_4 = et
-    label_2 = np.logical_and(wt, np.logical_not(tc))
-    label_1 = np.logical_and(tc, np.logical_not(et))
-
-    res[label_1] = 1
-    res[label_2] = 2
-    res[label_4] = 4
-    return res
-
-
-def save_pred(pred, predSavePath):
-    pred = pred.detach().cpu().numpy()
-
-    pred2 = ReverseBratsClassFromMultiChannel(pred)
-    write_nifti(pred2, file_name=predSavePath)
-
-
 class Brats2021Model(pl.LightningModule):
     def __init__(self, cfg=Config()):
         super(Brats2021Model, self).__init__()
         self.cfg = cfg
-        if cfg.back_bone_name == 'SwinUnet':
-            self.net = swinUnet_t_3D(window_size=cfg.window_size,
-                                     num_classes=cfg.n_classes,
-                                     in_channel=cfg.in_channels)
-
-        elif cfg.back_bone_name == 'Unet3D_0':
-            self.net = UNet(spatial_dims=3, in_channels=cfg.in_channels,
-                            out_channels=cfg.n_classes,
-                            channels=(32, 64, 128, 256, 512),
-                            strides=(2, 2, 2, 2))
-        else:
-            self.net = UNETR(in_channels=cfg.in_channels,
-                             out_channels=cfg.n_classes,
-                             img_size=cfg.RoiSize)
+        model = cfg.ModelDict[cfg.model_name]
+        kwargs = cfg.ArgsDict[cfg.model_name]
+        self.net = model(**kwargs)
 
         self.loss_func = DiceLoss(smooth_nr=0, smooth_dr=1e-5,
                                   squared_pred=True, to_onehot_y=False,
-                                  sigmoid=True)
-        self.metrics = DiceMetric(include_background=True,
-                                  reduction="mean")
+                                  sigmoid=True, )
+        self.dice_metric = DiceMetric(include_background=True,
+                                      reduction="mean_batch")
+        # self.HD_metric = HausdorffDistanceMetric(include_background=True, reduction='mean_batch')
         self.post_trans = Compose([EnsureType(),
                                    Activations(sigmoid=True),
                                    AsDiscrete(threshold_values=True)])
+        self.label_reverse = ReverseBratsLabel()
 
     def configure_optimizers(self):
         cfg = self.cfg
@@ -345,6 +388,7 @@ class Brats2021Model(pl.LightningModule):
         self.log('train_tc_dice', tc_dice, prog_bar=True)
         self.log('train_et_dice', et_dice, prog_bar=True)
         self.log('train_wt_dice', wt_dice, prog_bar=True)
+
         self.log('train_loss', loss, prog_bar=True)
 
         return {'loss': loss, 'train_dice': dices}
@@ -363,10 +407,22 @@ class Brats2021Model(pl.LightningModule):
         self.log('valid_tc_dice', tc_dice, prog_bar=True)
         self.log('valid_et_dice', et_dice, prog_bar=True)
         self.log('valid_wt_dice', wt_dice, prog_bar=True)
+
         self.log('valid_loss', loss, prog_bar=True)
         if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-            names = batch['image_meta_dict']['filename_or_obj']
-            self.save_pred_label(y_hat, names)
+            meta_dict = batch['image_meta_dict']
+            for k, v in meta_dict.items():
+                if isinstance(v, torch.Tensor):
+                    meta_dict[k] = v.detach().cpu()
+
+            y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+            y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+            y_hat = [self.label_reverse(i) for i in y_hat]
+            saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+            saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
+
+            # names = batch['image_meta_dict']['filename_or_obj']
+            # self.save_pred_label(y_hat, names)
 
         return {'valid_loss': loss, 'valid_dice': dices}
 
@@ -375,31 +431,36 @@ class Brats2021Model(pl.LightningModule):
         pre_paths = batch['pred_path']
         preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
                                          sw_batch_size=1, predictor=self.net)
+        preds = preds.detach().cpu()
         preds = [self.post_trans(i) for i in decollate_batch(preds)]
-        for pred, save_name in zip(preds, pre_paths):
-            save_pred(pred, save_name)
+        preds = [self.label_reverse(i) for i in preds]
+
+        meta_dict = batch['image_meta_dict']
+        for k, v in meta_dict.items():
+            if isinstance(v, torch.Tensor):
+                meta_dict[k] = v.detach().cpu()
+        saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
+        saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
+
+        # for pred, save_name in zip(preds, pre_paths):
+        #     save_pred(pred, save_name)
 
     def training_epoch_end(self, outputs):
-        losses, dices = self.shared_epoch_end(outputs, 'loss', 'train_dice')
+        losses, mean_dice = self.shared_epoch_end(outputs, 'loss')
         if len(losses) > 0:
-            mean_loss = torch.mean(losses, dim=0)
-            mean_dice = torch.mean(dices, dim=1)
-
+            mean_loss = torch.mean(losses)
             # 三个通道为：TC（肿瘤核心）、WT（整个肿瘤）和ET（肿瘤增强)。
             tc_mean_dice, wt_mean_dice, et_mean_dice = mean_dice[0], mean_dice[1], mean_dice[2]
 
             self.log('train_mean_loss', mean_loss, prog_bar=True)
             self.log('tc_train_mean_dice', tc_mean_dice, prog_bar=True)
-
             self.log('wt_train_mean_dice', wt_mean_dice, prog_bar=True)
-
             self.log('et_train_mean_dice', et_mean_dice, prog_bar=True)
 
     def validation_epoch_end(self, outputs):
-        losses, dices = self.shared_epoch_end(outputs, 'valid_loss', 'valid_dice')
+        losses, mean_dice = self.shared_epoch_end(outputs, 'valid_loss')
         if len(losses) > 0:
             mean_loss = torch.mean(losses)
-            mean_dice = torch.mean(dices, dim=1)
 
             # 三个通道为：TC（肿瘤核心）、WT（整个肿瘤）和ET（肿瘤增强)。
             tc_mean_dice, wt_mean_dice, et_mean_dice = mean_dice[0], mean_dice[1], mean_dice[2]
@@ -409,33 +470,27 @@ class Brats2021Model(pl.LightningModule):
             self.log('wt_valid_mean_dice', wt_mean_dice, prog_bar=True)
             self.log('et_valid_mean_dice', et_mean_dice, prog_bar=True)
 
-    def shared_epoch_end(self, outputs, loss_key, dice_key):
-        losses, dices = [], []
+    def shared_epoch_end(self, outputs, loss_key):
+        losses = []
         for output in outputs:
             # loss = output['loss'].detach().cpu().numpy()
             loss = output[loss_key]
-            dice = output[dice_key]
-
             loss = loss.detach()
-            dice = dice.detach()
-
             losses.append(loss)
-            dices.append(dice)
 
         losses = torch.stack(losses)
-        dices = torch.stack(dices)
 
-        dices = torch.permute(dices, (1, 0))
-        self.metrics.reset()
+        mean_dice = self.dice_metric.aggregate()
+        self.dice_metric.reset()
 
-        return losses, dices
+        return losses, mean_dice
 
     def shared_step(self, y_hat, y):
         loss = self.loss_func(y_hat, y)
-        y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-        dice = self.metrics(y_pred=y_hat, y=y)
 
-        # loss = torch.nan_to_num(loss)
+        y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+        dice = self.dice_metric(y_pred=y_hat, y=y)
+        loss = torch.nan_to_num(loss)
         dice = torch.nan_to_num(dice)
         dice = torch.mean(dice, dim=0)
 
@@ -444,7 +499,7 @@ class Brats2021Model(pl.LightningModule):
     def save_pred_label(self, y_hats, names):
         cfg = self.cfg
         y_hats = [self.post_trans(i) for i in decollate_batch(y_hats)]
-        save_dir = os.path.join(f'./PredLabel/{cfg.back_bone_name}')
+        save_dir = os.path.join(f'./PredLabel/{cfg.model_name}')
         save_dir = os.path.abspath(save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -463,7 +518,7 @@ early_stop = EarlyStopping(
 )
 
 cfg = Config()
-check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
+check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.model_name}',
                               save_last=False,
                               save_top_k=3, monitor='valid_mean_loss', verbose=True,
                               filename='{epoch}-{valid_loss:.2f}-{et_valid_mean_dice:.2f}')
@@ -476,7 +531,7 @@ trainer = pl.Trainer(
 
     # auto_lr_find=True,
     auto_scale_batch_size=True,
-    logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.back_bone_name}'),
+    logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.model_name}'),
     callbacks=[early_stop, check_point],
     precision=16,
     accumulate_grad_batches=16,
@@ -488,9 +543,9 @@ trainer = pl.Trainer(
 
 if Config.NeedTrain:
     trainer.fit(model, data)
-    trainer.save_checkpoint(f'./trained_models/{cfg.back_bone_name}/TrainedModel.ckpt')
+    trainer.save_checkpoint(f'./trained_models/{cfg.model_name}/TrainedModel.ckpt')
 else:
-    save_path = f'./trained_models/{cfg.back_bone_name}/epoch=37-valid_loss=0.12-et_valid_mean_dice=0.81.ckpt'
+    save_path = f'./trained_models/{cfg.model_name}/epoch=37-valid_loss=0.12-et_valid_mean_dice=0.81.ckpt'
 
     model = Brats2021Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
     model.eval()

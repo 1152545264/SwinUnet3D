@@ -19,9 +19,8 @@ from monai.config import KeysCollection
 from torch.utils.data import random_split
 from SwinUnet_3D import swinUnet_t_3D
 from monai.losses import DiceLoss, DiceFocalLoss, GeneralizedDiceLoss
-from monai.metrics import DiceMetric
-from torchmetrics.functional import dice_score
-from monai.networks.utils import one_hot
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.networks.nets import UNETR, UNet, VNet, RegUNet, DynUNet, SegResNet, DiNTS
 from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch
@@ -44,15 +43,15 @@ class Config(object):
     BatchSize = 1
     NumWorkers = 0
 
-    lower = 5
-    upper = 95
+    lower = 0.5
+    upper = 99.5
 
     n_classes = 2
 
     lr = 3e-4  # 学习率
 
-    back_bone_name = 'SwinUnet_0'
-    # back_bone_name = 'Unet3D_0'
+    back_bone_name = 'SwinUnet'
+    # back_bone_name = 'Unet3D'
     # back_bone_name = 'UnetR'
 
     # 滑动窗口推理时使用
@@ -130,11 +129,10 @@ class LitsDataSet(pl.LightningDataModule):
 
             transforms.Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim,
                                 mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'label'], axcodes='RAS'),
+            transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
 
             transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.lower, upper=cfg.upper, b_min=0.0,
                                                        b_max=1.0, clip=True),
-            transforms.CropForegroundd(keys=['image', 'seg'], source_key='image'),
             transforms.RandSpatialCropd(keys=['image', 'seg'], roi_size=cfg.FinalShape, random_size=False),
             transforms.SpatialPadd(keys=['image', 'seg'], spatial_size=cfg.FinalShape),
 
@@ -162,10 +160,6 @@ class LitsDataSet(pl.LightningDataModule):
         train_x = sorted(glob(os.path.join(self.train_path, '*.nii.gz')))
         train_y = sorted(glob(os.path.join(self.label_tr_path, '*.nii.gz')))
         test_x = sorted(glob(os.path.join(self.test_path, '*.nii.gz')))
-
-        # train_x.sort()
-        # train_y.sort()
-        # test_x.sort()
         return train_x, train_y, test_x
 
     def split_dataset(self):
@@ -185,11 +179,10 @@ class Lung(pl.LightningModule):
     def __init__(self, cfg=Config()):
         super(Lung, self).__init__()
         self.cfg = cfg
-        if cfg.back_bone_name == 'SwinUnet_0':
+        if cfg.back_bone_name == 'SwinUnet':
             self.net = swinUnet_t_3D(window_size=cfg.window_size, num_classes=cfg.n_classes, in_channel=cfg.in_channels,
                                      )
         else:
-            from monai.networks.nets import UNETR, UNet
             # self.net = UNETR(in_channels=cfg.in_channels, out_channels=cfg.n_classes, img_size=cfg.FinalShape)
             self.net = UNet(spatial_dims=3, in_channels=1, out_channels=2, channels=(32, 64, 128, 256, 512),
                             strides=(2, 2, 2, 2))
@@ -202,7 +195,6 @@ class Lung(pl.LightningModule):
         self.post_label = Compose([transforms.EnsureType(),
                                    transforms.AsDiscrete(to_onehot=True, num_classes=cfg.n_classes)])
 
-        # 这个类有bug, 当y_pred和y均为全零矩阵时，此处计算出来的dice系数为nan
         self.metrics = DiceMetric(include_background=False, reduction="mean")
         # self.metrics = dice_score
 
@@ -311,8 +303,8 @@ check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
                               filename='{epoch}-{valid_loss:.2f}-{valid_mean_dice:.2f}')
 trainer = pl.Trainer(
     progress_bar_refresh_rate=10,
-    max_epochs=1000,
-    min_epochs=30,
+    max_epochs=5000,
+    min_epochs=200,
     gpus=1,
     # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
 
