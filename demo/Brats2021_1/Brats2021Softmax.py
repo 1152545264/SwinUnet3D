@@ -22,7 +22,7 @@ from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
-from monai.networks.nets import UNETR, UNet, SegResNet, DiNTS  # , DynUNet
+from monai.networks.nets import UNETR, UNet, SegResNet, DiNTS, VNet  # , DynUNet
 from monai.networks.nets import TopologySearch
 from monai.transforms import (
     Activations,
@@ -47,6 +47,7 @@ from monai.transforms import (
     SpatialPadd,
     ScaleIntensityRangePercentilesd,
 )
+from timm.models.layers import trunc_normal_
 
 pl.seed_everything(42)
 set_determinism(42)
@@ -84,11 +85,11 @@ class Config(object):
     roi_size = RoiSize
     overlap = 0.0
 
-    # model_name = 'SwinUnet'
+    # model_name = 'SwinUnet3D'
     # model_name = 'Unet3D'
-    # model_name = 'VNet'
+    model_name = 'VNet'
     # model_name = 'DynUNet'
-    model_name = 'SegResNet'
+    # model_name = 'SegResNet'
     # model_name = 'DiNTS'
     # model_name = 'UNetR'
 
@@ -100,8 +101,7 @@ class Config(object):
                           'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
 
     ModelDict['VNet'] = VNet
-    ArgsDict['VNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, 'dropout_prob': 0.0,
-                        'act': ("prelu", {})}
+    ArgsDict['VNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, 'dropout_prob': 0.0, }
 
     # TODO 添加DynUNet，SegResNet和DiNTS的参数配置
     # ModelDict['DynUNet'] = DynUNet
@@ -116,8 +116,8 @@ class Config(object):
     ModelDict['UNetR'] = UNETR
     ArgsDict['UNetR'] = {'in_channels': in_channels, 'out_channels': n_classes, 'img_size': RoiSize}
 
-    ModelDict['SWinUnet'] = swinUnet_t_3D
-    ArgsDict['SWinUNet'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
+    ModelDict['SwinUnet3D'] = swinUnet_t_3D
+    ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
 
     # NeedTrain = False
     NeedTrain = True
@@ -139,7 +139,7 @@ class ObserveShape(transforms.MapTransform):
         return d
 
 
-class ReverseBratsLabel(transforms.Transform):
+class ReverseBratsLabelNumpy(transforms.Transform):
     def __call__(self, pred):
         if isinstance(pred, torch.Tensor):
             pred = pred.numpy()
@@ -163,33 +163,26 @@ class ReverseBratsLabel(transforms.Transform):
         return res
 
 
-def ReverseBratsClassFromMultiChannel(pred):
-    '''
-    # merge labels 1 (tumor non-enh) and 4 (tumor enh) to TC
-    result.append(np.logical_or(img == 1, img == 4))
-    # merge labels 1 (tumor non-enh) and 4 (tumor enh) and 2 (large edema) to WT
-    result.append(np.logical_or(np.logical_or(img == 1, img == 4), img == 2))
-    # label 4 is ET
-    result.append(img == 4)
-    '''
-    pred = pred.astype(np.bool)
-    tc = pred[0, ::]
-    wt = pred[1, ::]
-    et = pred[2, ::]
-    res = np.zeros(pred.shape[1:])
+class ReverseBratsLabel(transforms.Transform):
+    def __call__(self, pred):
+        pred = pred.bool()
+        tc = pred[0, ::]
+        wt = pred[1, ::]
+        et = pred[2, ::]
+        res = torch.zeros(pred.shape[1:])
 
-    # label_4 = et
-    # label_2 = wt - tc
-    # label_1 = tc - et
+        # label_4 = et
+        # label_2 = wt - tc
+        # label_1 = tc - et
 
-    label_4 = et
-    label_2 = np.logical_and(wt, np.logical_not(tc))
-    label_1 = np.logical_and(tc, np.logical_not(et))
+        label_4 = et
+        label_2 = torch.logical_and(wt, torch.logical_not(tc))
+        label_1 = torch.logical_and(tc, torch.logical_not(et))
 
-    res[label_1] = 1
-    res[label_2] = 2
-    res[label_4] = 4
-    return res
+        res[label_1] = 1
+        res[label_2] = 2
+        res[label_4] = 4
+        return res
 
 
 def save_pred(pred, predSavePath):
@@ -353,6 +346,8 @@ class Brats2021Model(pl.LightningModule):
         model = cfg.ModelDict[cfg.model_name]
         kwargs = cfg.ArgsDict[cfg.model_name]
         self.net = model(**kwargs)
+        if cfg.model_name != 'SwinUnet3D':  # Monai中的模型缺乏参数初始化，不加参数初始化容易导致某些通道的dice系数爆零
+            ModelParamInit(self.net)
 
         self.loss_func = DiceLoss(smooth_nr=0, smooth_dr=1e-5,
                                   squared_pred=True, to_onehot_y=False,
@@ -410,19 +405,22 @@ class Brats2021Model(pl.LightningModule):
 
         self.log('valid_loss', loss, prog_bar=True)
         if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-            meta_dict = batch['image_meta_dict']
-            for k, v in meta_dict.items():
-                if isinstance(v, torch.Tensor):
-                    meta_dict[k] = v.detach().cpu()
+            pass
+        meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+        for k, v in meta_dict.items():
+            if isinstance(v, torch.Tensor):
+                meta_dict[k] = v.detach().cpu()
 
-            y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
-            y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-            y_hat = [self.label_reverse(i) for i in y_hat]
-            saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
-            saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
+        y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+        y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+        y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+        y_hat = torch.stack(y_hat)  # B,H,W,D
+        y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+        saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+        saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
 
-            # names = batch['image_meta_dict']['filename_or_obj']
-            # self.save_pred_label(y_hat, names)
+        # names = batch['image_meta_dict']['filename_or_obj']
+        # self.save_pred_label(y_hat, names)
 
         return {'valid_loss': loss, 'valid_dice': dices}
 
@@ -431,14 +429,17 @@ class Brats2021Model(pl.LightningModule):
         pre_paths = batch['pred_path']
         preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
                                          sw_batch_size=1, predictor=self.net)
-        preds = preds.detach().cpu()
-        preds = [self.post_trans(i) for i in decollate_batch(preds)]
-        preds = [self.label_reverse(i) for i in preds]
-
         meta_dict = batch['image_meta_dict']
         for k, v in meta_dict.items():
             if isinstance(v, torch.Tensor):
                 meta_dict[k] = v.detach().cpu()
+
+        preds = preds.detach().cpu()
+        preds = [self.post_trans(i) for i in decollate_batch(preds)]
+        preds = [self.label_reverse(i) for i in preds]
+        preds = torch.stack(preds)  # B,H,W,D
+        preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+
         saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
         saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
 
@@ -507,6 +508,20 @@ class Brats2021Model(pl.LightningModule):
             save_name = save_name.split('\\')[-1]
             save_name = os.path.join(save_dir, save_name)
             save_pred(y_hat, save_name)
+
+
+def ModelParamInit(model):
+    assert isinstance(model, nn.Module)
+    for m in model.modules():
+        if isinstance(m, (nn.Conv3d, nn.ConvTranspose3d, nn.Linear)):
+            trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm3d)):
+            if m.weight is not None:
+                nn.init.constant_(m.weight, 1.0)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
 
 data = Brats2021DataSet()
