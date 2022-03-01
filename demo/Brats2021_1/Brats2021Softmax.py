@@ -1,6 +1,6 @@
 # -*-coding:utf-8-*-
 import os
-
+import random
 import torch
 from torch import nn, functional as F, optim
 import monai
@@ -49,6 +49,9 @@ from monai.transforms import (
 )
 from timm.models.layers import trunc_normal_
 
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
 pl.seed_everything(42)
 set_determinism(42)
 
@@ -85,9 +88,9 @@ class Config(object):
     roi_size = RoiSize
     overlap = 0.0
 
-    # model_name = 'SwinUnet3D'
+    model_name = 'SwinUnet3D'
     # model_name = 'Unet3D'
-    model_name = 'VNet'
+    # model_name = 'VNet'
     # model_name = 'DynUNet'
     # model_name = 'SegResNet'
     # model_name = 'DiNTS'
@@ -124,6 +127,7 @@ class Config(object):
     SaveTrainPred = True
     data_path = r'D:\Caiyimin\Dataset\Brats2021'
     ValidSegDir = os.path.join(data_path, 'ValidSeg', model_name)
+    PredDataDir = os.path.join(data_path, 'Brats2021Pred')
     PredSegDir = os.path.join(data_path, 'PredSeg', model_name)
 
 
@@ -208,8 +212,8 @@ class Brats2021DataSet(pl.LightningDataModule):
         self.train_process = None
         self.val_process = None
 
-        self.pred_dir = cfg.PredSegDir
-        self.predSaveDir = cfg.ValidSegDir
+        self.pred_dir = cfg.PredDataDir
+        self.predSaveDir = cfg.PredSegDir
         self.pred_files = []
         self.pred_set = None
         self.test_transforms = None
@@ -405,22 +409,21 @@ class Brats2021Model(pl.LightningModule):
 
         self.log('valid_loss', loss, prog_bar=True)
         if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-            pass
-        meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
-        for k, v in meta_dict.items():
-            if isinstance(v, torch.Tensor):
-                meta_dict[k] = v.detach().cpu()
+            meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+            for k, v in meta_dict.items():
+                if isinstance(v, torch.Tensor):
+                    meta_dict[k] = v.detach().cpu()
 
-        y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
-        y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-        y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
-        y_hat = torch.stack(y_hat)  # B,H,W,D
-        y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-        saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
-        saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
+            y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+            y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+            y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+            y_hat = torch.stack(y_hat)  # B,H,W,D
+            y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+            saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+            saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
 
-        # names = batch['image_meta_dict']['filename_or_obj']
-        # self.save_pred_label(y_hat, names)
+            # names = batch['image_meta_dict']['filename_or_obj']
+            # self.save_pred_label(y_hat, names)
 
         return {'valid_loss': loss, 'valid_dice': dices}
 
@@ -533,7 +536,7 @@ early_stop = EarlyStopping(
 )
 
 cfg = Config()
-check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.model_name}',
+check_point = ModelCheckpoint(dirpath=f'./logs/{cfg.model_name}',
                               save_last=False,
                               save_top_k=3, monitor='valid_mean_loss', verbose=True,
                               filename='{epoch}-{valid_loss:.2f}-{et_valid_mean_dice:.2f}')
@@ -543,7 +546,6 @@ trainer = pl.Trainer(
     min_epochs=cfg.min_epoch,
     gpus=1,
     # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
-
     # auto_lr_find=True,
     auto_scale_batch_size=True,
     logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.model_name}'),
@@ -560,10 +562,11 @@ if Config.NeedTrain:
     trainer.fit(model, data)
     trainer.save_checkpoint(f'./trained_models/{cfg.model_name}/TrainedModel.ckpt')
 else:
-    save_path = f'./trained_models/{cfg.model_name}/epoch=37-valid_loss=0.12-et_valid_mean_dice=0.81.ckpt'
+    save_path = f'./trained_models/{cfg.model_name}/epoch=95-valid_loss=0.15-et_valid_mean_dice=0.85.ckpt'
 
     model = Brats2021Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
     model.eval()
     model.freeze()
 
+predict_data = Brats2021DataSet()
 trainer.predict(model, datamodule=data)
