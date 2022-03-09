@@ -49,14 +49,14 @@ from monai.transforms import (
 )
 from timm.models.layers import trunc_normal_
 
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
-pl.seed_everything(42)
-set_determinism(42)
+
+def setseed(seed: int = 42):
+    pl.seed_everything(seed)
+    set_determinism(seed)
 
 
 class Config(object):
+    seed = 42  # 设置随机数种子
     # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
     PadShape = [256, 256, 160]
     RoiSize = [256, 256, 160]
@@ -68,9 +68,9 @@ class Config(object):
 
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
-    NumWorkers = 0
+    NumWorkers = 4  # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
     max_epoch = 400
-    min_epoch = 10
+    min_epoch = 50
 
     LRCycle = 10
     '''
@@ -340,7 +340,9 @@ class Brats2021DataSet(pl.LightningDataModule):
             remain = num - train_num - val_num
             val_num += remain
 
-        self.train_dict, self.val_dict = random_split(self.train_dict, [train_num, val_num])
+        self.train_dict, self.val_dict = random_split(self.train_dict, [train_num, val_num],
+                                                      generator=torch.Generator().manual_seed(cfg.seed))
+        # 设置generator保证不同模型划分出来的训练集和验证集相同
 
 
 class Brats2021Model(pl.LightningModule):
@@ -374,6 +376,7 @@ class Brats2021Model(pl.LightningModule):
         return {'optimizer': opt, 'lr_scheduler': lr_scheduler, 'monitor': 'valid_mean_loss'}
 
     def training_step(self, batch, batch_idx):
+        cfg = self.cfg
         x = batch['image']
         y = batch['label'].float()
         y_hat = sliding_window_inference(x, roi_size=cfg.roi_size,
@@ -428,6 +431,7 @@ class Brats2021Model(pl.LightningModule):
         return {'valid_loss': loss, 'valid_dice': dices}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
+        cfg = self.cfg
         img = batch['image']
         pre_paths = batch['pred_path']
         preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
@@ -527,46 +531,52 @@ def ModelParamInit(model):
                 nn.init.constant_(m.bias, 0)
 
 
-data = Brats2021DataSet()
-model = Brats2021Model()
+def main():
+    data = Brats2021DataSet()
+    model = Brats2021Model()
 
-early_stop = EarlyStopping(
-    monitor='valid_mean_loss',
-    patience=5,
-)
+    early_stop = EarlyStopping(
+        monitor='valid_mean_loss',
+        patience=5,
+    )
 
-cfg = Config()
-check_point = ModelCheckpoint(dirpath=f'./logs/{cfg.model_name}',
-                              save_last=False,
-                              save_top_k=3, monitor='valid_mean_loss', verbose=True,
-                              filename='{epoch}-{valid_loss:.2f}-{et_valid_mean_dice:.2f}')
-trainer = pl.Trainer(
-    progress_bar_refresh_rate=10,
-    max_epochs=cfg.max_epoch,
-    min_epochs=cfg.min_epoch,
-    gpus=1,
-    # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
-    # auto_lr_find=True,
-    auto_scale_batch_size=True,
-    logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.model_name}'),
-    callbacks=[early_stop, check_point],
-    precision=16,
-    accumulate_grad_batches=16,
-    num_sanity_val_steps=0,
-    log_every_n_steps=400,
-    gradient_clip_val=1e3,
-    gradient_clip_algorithm='norm',
-)
+    cfg = Config()
+    check_point = ModelCheckpoint(dirpath=f'./logs/{cfg.model_name}',
+                                  save_last=False,
+                                  save_top_k=3, monitor='valid_mean_loss', verbose=True,
+                                  filename='{epoch}-{valid_loss:.2f}-{et_valid_mean_dice:.2f}')
+    trainer = pl.Trainer(
+        progress_bar_refresh_rate=10,
+        max_epochs=cfg.max_epoch,
+        min_epochs=cfg.min_epoch,
+        gpus=1,
+        # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
+        # auto_lr_find=True,
+        auto_scale_batch_size=True,
+        logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.model_name}'),
+        callbacks=[early_stop, check_point],
+        precision=16,
+        accumulate_grad_batches=16,
+        num_sanity_val_steps=0,
+        log_every_n_steps=400,
+        gradient_clip_val=1e3,
+        gradient_clip_algorithm='norm',
+    )
 
-if Config.NeedTrain:
-    trainer.fit(model, data)
-    trainer.save_checkpoint(f'./trained_models/{cfg.model_name}/TrainedModel.ckpt')
-else:
-    save_path = f'./trained_models/{cfg.model_name}/epoch=95-valid_loss=0.15-et_valid_mean_dice=0.85.ckpt'
+    if Config.NeedTrain:
+        trainer.fit(model, data)
+        trainer.save_checkpoint(f'./trained_models/{cfg.model_name}/TrainedModel.ckpt')
+    else:
+        save_path = f'./trained_models/{cfg.model_name}/epoch=95-valid_loss=0.15-et_valid_mean_dice=0.85.ckpt'
 
-    model = Brats2021Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
-    model.eval()
-    model.freeze()
+        model = Brats2021Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
+        model.eval()
+        model.freeze()
 
-predict_data = Brats2021DataSet()
-trainer.predict(model, datamodule=data)
+    predict_data = Brats2021DataSet()
+    trainer.predict(model, datamodule=data)
+
+
+if __name__ == '__main__':
+    setseed()
+    main()

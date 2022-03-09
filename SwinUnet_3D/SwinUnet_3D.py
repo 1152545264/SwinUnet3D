@@ -85,16 +85,14 @@ class FeedForward3D(nn.Module):
         self.fc1 = nn.Linear(dim, hidden_dim)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, dim)
-        self.drop = nn.Dropout(dropout)
-        self.drop_ratio = dropout
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
-        if self.drop_ratio > 0:
-            x = self.drop(x)
+        x = self.drop(x)
         return x
 
 
@@ -284,6 +282,7 @@ class PatchMerging3D(nn.Module):
         self.dsf = downscaling_factor  # 2 或者 4
         self.hidden_dim = (downscaling_factor ** 3) * in_dims
         self.patch_merge = nn.Linear(self.hidden_dim, out_dims)
+        self.norm = nn.LayerNorm(out_dims)
 
     def forward(self, x):
         # x: B, C, x_s, y_s, z_s
@@ -291,7 +290,51 @@ class PatchMerging3D(nn.Module):
         x = rearrange(x, 'b c (x_ns x_dsf) (y_ns y_dsf) (z_ns z_dsf) -> b x_ns y_ns z_ns (x_dsf y_dsf z_dsf c)',
                       x_dsf=dsf, y_dsf=dsf, z_dsf=dsf)
         x = self.patch_merge(x)
+        x = self.norm(x)
         return x  # b,  w_x //down_scaling, w_y//down_scaling, w_z//down_scaling, out_dim
+
+
+class PatchExpand3D(nn.Module):
+    def __init__(self, in_dim, out_dim, up_scaling_factor):
+        super(PatchExpand3D, self).__init__()
+        self.in_dims = in_dim
+        self.out_dims = out_dim
+
+        self.usf = up_scaling_factor  # 2 或者 4
+
+        # X, Y, Z, out_dims -> X, Y, Z, (down_scaling ** 3) * out_dims
+        fc_dim = (up_scaling_factor ** 3) * out_dim
+        self.c_up = nn.Linear(in_dim, fc_dim)
+        self.norm = nn.LayerNorm(fc_dim)
+
+    def forward(self, x):
+        '''X: B,C,X,Y,Z'''
+        x = rearrange(x, 'b c x_s y_s z_s -> b x_s y_s z_s c')
+        x = self.c_up(x)
+        x = self.norm(x)
+        x = rearrange(x, 'b x_s y_s z_s (fac1 fac2 fac3 c) -> b  (x_s fac1) (y_s fac2) (z_s fac3) c',
+                      fac1=self.usf, fac2=self.usf, fac3=self.usf)
+        return x
+
+
+class PatchExpand3DFinal(nn.Module):  # 体素最终分类时使用
+    def __init__(self, in_dim, out_dim, up_scaling_factor):
+        super(PatchExpand3DFinal, self).__init__()
+        self.in_dims = in_dim
+        self.out_dims = out_dim
+        self.usf = up_scaling_factor  # 2 或者 4
+
+        # X, Y, Z, out_dims -> X, Y, Z, (down_scaling ** 3) * out_dims
+        fc_dim = (up_scaling_factor ** 3) * out_dim
+        self.c_up = nn.Linear(in_dim, fc_dim)
+
+    def forward(self, x):
+        '''X: B,C,X,Y,Z'''
+        x = rearrange(x, 'b c x_s y_s z_s -> b x_s y_s z_s c')
+        x = self.c_up(x)
+        x = rearrange(x, 'b x_s y_s z_s (fac1 fac2 fac3 c) -> b  (x_s fac1) (y_s fac2) (z_s fac3) c',
+                      fac1=self.usf, fac2=self.usf, fac3=self.usf)
+        return x
 
 
 '''
@@ -309,27 +352,6 @@ X , Y ,Z, out_dims ->
 X , Y ,Z, (down_scaling**3)*out_dims ->  
 X* down_scaling, Y*down_scaling,Z*down_scaling, out_dims 
 '''
-
-
-class PatchExpand3D(nn.Module):
-    def __init__(self, in_dim, out_dim, up_scaling_factor):
-        super(PatchExpand3D, self).__init__()
-        self.in_dims = in_dim
-        self.out_dims = out_dim
-
-        self.usf = up_scaling_factor  # 2 或者 4
-
-        # X, Y, Z, out_dims -> X, Y, Z, (down_scaling ** 3) * out_dims
-        fc_dim = (up_scaling_factor ** 3) * out_dim
-        self.c_up = nn.Linear(in_dim, fc_dim)
-
-    def forward(self, x):
-        '''X: B,C,X,Y,Z'''
-        x = rearrange(x, 'b c x_s y_s z_s -> b x_s y_s z_s c')
-        x = self.c_up(x)
-        x = rearrange(x, 'b x_s y_s z_s (fac1 fac2 fac3 c) -> b  (x_s fac1) (y_s fac2) (z_s fac3) c',
-                      fac1=self.usf, fac2=self.usf, fac3=self.usf)
-        return x
 
 
 class StageModuleDownScaling3D(nn.Module):
@@ -418,7 +440,7 @@ class Converge(nn.Module):
 class SwinUnet3D(nn.Module):
     def __init__(self, *, hidden_dim, layers, heads, in_channel=1, num_classes=2, head_dim=32,
                  window_size: Union[int, List[int]] = 7, downscaling_factors=(4, 2, 2, 2),
-                 relative_pos_embedding=True, dropout: float = 0.0):
+                 relative_pos_embedding=True, dropout: float = 0.0, ):
         super().__init__()
 
         self.dsf = downscaling_factors
@@ -466,18 +488,18 @@ class SwinUnet3D(nn.Module):
         self.converge2 = Converge(hidden_dim * 4, hidden_dim * 2)
         self.converge3 = Converge(hidden_dim * 2, hidden_dim)
 
-        self.final_resume = PatchExpand3D(in_dim=hidden_dim, out_dim=num_classes,
-                                          up_scaling_factor=downscaling_factors[0])
+        self.final_resume = PatchExpand3DFinal(in_dim=hidden_dim, out_dim=num_classes,
+                                               up_scaling_factor=downscaling_factors[0])
         # 参数初始化
         self.init_weight()
 
         '''
-              工作流程为：
-              down[i] <==== down_stage[i](x)  , 1<= i <= 4
-              up[1]   <==== up_stage[1](down[4])
-              up[i]   <==== up_stage[i]( cat(up[i-1], down[4-i]) ), 2 <= i <= 3
-              img_embed = img2flatten_dim(img) , # b,flatten_dim,x,y,z  <- b,c,x,y,z
-              up[4]   <==== up_stage[4]( cat(up[i], img_embed) ) 
+          工作流程为：
+          down[i] <==== down_stage[i](x)  , i >= 1 and i <= 4
+          up[1]   <==== up_stage[1](down[4])
+          up[i]   <==== up_stage[i]( cat(up[i-1], down[4-i]) ), 2 <= i <= 3
+          img_embed = img2flatten_dim(img) , # b,flatten_dim,x,y,z  <- b,c,x,y,z
+          up[4]   <==== up_stage[4]( cat(up[i], img_embed) ) 
           '''
 
     def forward(self, img):
