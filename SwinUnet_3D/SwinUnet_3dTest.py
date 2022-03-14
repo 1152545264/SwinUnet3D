@@ -35,9 +35,10 @@ def testPatchMergingAndExpand():
 
 def testSwinUnet3D():
     #               B,  C, X_S, Y_S, Z_S
-    x = torch.randn((1, 3, 96, 96, 96))
+    x = torch.randn((1, 3, 224, 224, 96))
+    window_size = [i // 32 for i in x.shape[2:]]
     seg = SwinUnet_3D.swinUnet_t_3D(hidden_dim=96, layers=(2, 2, 6, 2), heads=(3, 6, 12, 24),
-                                    window_size=[3, 3, 3], in_channel=3, num_classes=4
+                                    window_size=window_size, in_channel=3, num_classes=4
                                     )
     '''
     必需保证： X_S%(x_ws*32) == 0
@@ -51,4 +52,5 @@ def testSwinUnet3D():
     print(y.shape)
 
 
-testSwinUnet3D()
+if __name__ == '__main__':
+    testSwinUnet3D()

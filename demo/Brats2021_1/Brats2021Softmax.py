@@ -68,7 +68,8 @@ class Config(object):
 
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
-    NumWorkers = 4  # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
+    NumWorkers = 0  # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
+
     max_epoch = 400
     min_epoch = 50
 
@@ -88,13 +89,13 @@ class Config(object):
     roi_size = RoiSize
     overlap = 0.0
 
-    model_name = 'SwinUnet3D'
+    # model_name = 'SwinUnet3D'
     # model_name = 'Unet3D'
     # model_name = 'VNet'
     # model_name = 'DynUNet'
     # model_name = 'SegResNet'
     # model_name = 'DiNTS'
-    # model_name = 'UNetR'
+    model_name = 'UNetR'
 
     ModelDict = {}
     ArgsDict = {}
@@ -238,16 +239,16 @@ class Brats2021DataSet(pl.LightningDataModule):
 
     def train_dataloader(self):
         cfg = self.cfg
-        return DataLoader(self.train_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
+        return DataLoader(self.train_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=True)
 
     def val_dataloader(self):
         cfg = self.cfg
-        return DataLoader(self.val_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
+        return DataLoader(self.val_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=True)
 
     def predict_dataloader(self):
         cfg = self.cfg
         return DataLoader(self.pred_set, batch_size=cfg.BatchSize,
-                          num_workers=cfg.NumWorkers)
+                          num_workers=cfg.NumWorkers, shuffle=True)
 
     def get_preprocess(self):
         cfg = self.cfg
