@@ -62,8 +62,8 @@ set_determinism(42)
 
 class Config(object):
     data_path = r'D:\Caiyimin\Dataset\Verse2020'
-    FinalShape = [192, 192, 224]
-    window_size = [6, 6, 7]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    FinalShape = [160, 160, 160]
+    window_size = [5, 5, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 1
 
     # 数据集原始尺寸(体素间距为1.0时)中位数为(386. 399. 464.)

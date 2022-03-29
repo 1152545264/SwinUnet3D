@@ -15,15 +15,17 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
 from torch.utils.data import random_split
 
-from SwinUnet_3D import swinUnet_t_3D
 from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
-from monai.networks.nets import UNETR, UNet, SegResNet, DiNTS, VNet  # , DynUNet
+from monai.networks.nets import UNETR, UNet, VNet  # , DynUNet,SegResNet
 from monai.networks.nets import TopologySearch
+from MedicalZooPytorch.lib.medzoo import ResNet3DMedNet, DenseVoxelNet, SkipDenseNet3D
+from SwinUnet_3D import swinUnet_t_3D
+from ConUnext3D import convnext_tiny
 from monai.transforms import (
     Activations,
     Activationsd,
@@ -58,7 +60,6 @@ def setseed(seed: int = 42):
 class Config(object):
     seed = 42  # 设置随机数种子
     # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
-    PadShape = [256, 256, 160]
     RoiSize = [256, 256, 160]
     window_size = [8, 8, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 4
@@ -89,13 +90,12 @@ class Config(object):
     roi_size = RoiSize
     overlap = 0.0
 
-    # model_name = 'SwinUnet3D'
+    model_name = 'SwinUnet3D'
     # model_name = 'Unet3D'
     # model_name = 'VNet'
-    # model_name = 'DynUNet'
-    # model_name = 'SegResNet'
-    # model_name = 'DiNTS'
-    model_name = 'UNetR'
+    # model_name = 'UNetR'
+
+    # model_name = 'ConvUext3D'
 
     ModelDict = {}
     ArgsDict = {}
@@ -107,21 +107,13 @@ class Config(object):
     ModelDict['VNet'] = VNet
     ArgsDict['VNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, 'dropout_prob': 0.0, }
 
-    # TODO 添加DynUNet，SegResNet和DiNTS的参数配置
-    # ModelDict['DynUNet'] = DynUNet
-    # ArgsDict['DynUNet'] = {}
-
-    ModelDict['SegResNet'] = SegResNet
-    ArgsDict['SegResNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, }
-
-    ModelDict['DiNTS'] = DiNTS
-    ArgsDict['DiNTS'] = {'dints_space': TopologySearch(), 'in_channels': in_channels, 'num_classes': n_classes, }
-
     ModelDict['UNetR'] = UNETR
     ArgsDict['UNetR'] = {'in_channels': in_channels, 'out_channels': n_classes, 'img_size': RoiSize}
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
+    ModelDict['ConvUext3D'] = convnext_tiny
+    ArgsDict['ConvUext3D'] = {'in_channels': 4, 'num_classes': 3}
 
     # NeedTrain = False
     NeedTrain = True
@@ -397,62 +389,60 @@ class Brats2021Model(pl.LightningModule):
         return {'loss': loss, 'train_dice': dices}
 
     def validation_step(self, batch, batch_idx):
-        cfg = self.cfg
-        x = batch['image']
-        y = batch['label'].float()
-        # 使用滑动窗口进行推理
-        y_hat = sliding_window_inference(x, roi_size=cfg.roi_size, overlap=cfg.overlap,
-                                         sw_batch_size=1, predictor=self.net)
+        with torch.no_grad():
+            cfg = self.cfg
+            x = batch['image']
+            y = batch['label'].float()
+            # 使用滑动窗口进行推理
+            y_hat = sliding_window_inference(x, roi_size=cfg.roi_size, overlap=cfg.overlap,
+                                             sw_batch_size=1, predictor=self.net)
 
-        loss, dices = self.shared_step(y_hat, y)
-        tc_dice, wt_dice, et_dice = dices[0], dices[1], dices[2]
+            loss, dices = self.shared_step(y_hat, y)
+            tc_dice, wt_dice, et_dice = dices[0], dices[1], dices[2]
 
-        self.log('valid_tc_dice', tc_dice, prog_bar=True)
-        self.log('valid_et_dice', et_dice, prog_bar=True)
-        self.log('valid_wt_dice', wt_dice, prog_bar=True)
+            self.log('valid_tc_dice', tc_dice, prog_bar=True)
+            self.log('valid_et_dice', et_dice, prog_bar=True)
+            self.log('valid_wt_dice', wt_dice, prog_bar=True)
 
-        self.log('valid_loss', loss, prog_bar=True)
-        if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-            meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+            self.log('valid_loss', loss, prog_bar=True)
+            if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
+                meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+                for k, v in meta_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        meta_dict[k] = v.detach().cpu()
+
+                y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+                y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+                y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+                y_hat = torch.stack(y_hat)  # B,H,W,D
+                y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+                saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+                saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
+
+                # names = batch['image_meta_dict']['filename_or_obj']
+                # self.save_pred_label(y_hat, names)
+
+            return {'valid_loss': loss, 'valid_dice': dices}
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=None):
+        with torch.no_grad():
+            cfg = self.cfg
+            img = batch['image']
+            preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
+                                             sw_batch_size=1, predictor=self.net)
+            meta_dict = batch['image_meta_dict']
             for k, v in meta_dict.items():
                 if isinstance(v, torch.Tensor):
                     meta_dict[k] = v.detach().cpu()
 
-            y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
-            y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-            y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
-            y_hat = torch.stack(y_hat)  # B,H,W,D
-            y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-            saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
-            saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
+            preds = preds.detach().cpu()
+            preds = [self.post_trans(i) for i in decollate_batch(preds)]
+            preds = [self.label_reverse(i) for i in preds]
+            preds = torch.stack(preds)  # B,H,W,D
+            preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
 
-            # names = batch['image_meta_dict']['filename_or_obj']
-            # self.save_pred_label(y_hat, names)
-
-        return {'valid_loss': loss, 'valid_dice': dices}
-
-    def predict_step(self, batch, batch_idx, dataloader_idx=None):
-        cfg = self.cfg
-        img = batch['image']
-        pre_paths = batch['pred_path']
-        preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
-                                         sw_batch_size=1, predictor=self.net)
-        meta_dict = batch['image_meta_dict']
-        for k, v in meta_dict.items():
-            if isinstance(v, torch.Tensor):
-                meta_dict[k] = v.detach().cpu()
-
-        preds = preds.detach().cpu()
-        preds = [self.post_trans(i) for i in decollate_batch(preds)]
-        preds = [self.label_reverse(i) for i in preds]
-        preds = torch.stack(preds)  # B,H,W,D
-        preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-
-        saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
-        saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
-
-        # for pred, save_name in zip(preds, pre_paths):
-        #     save_pred(pred, save_name)
+            saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
+            saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
 
     def training_epoch_end(self, outputs):
         losses, mean_dice = self.shared_epoch_end(outputs, 'loss')

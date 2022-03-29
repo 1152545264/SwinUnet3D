@@ -24,10 +24,9 @@ from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch, list_data_collate
-from monai.networks.utils import one_hot
-from einops import rearrange
-from torchmetrics.functional import dice_score
-from torchmetrics import IoU, Accuracy
+from monai.networks.nets import UNETR, UNet, VNet
+from timm.models.layers import trunc_normal_
+from monai.data import NiftiSaver
 from monai.transforms import (
     Activations,
     Activationsd,
@@ -61,10 +60,12 @@ set_determinism(42)
 
 class Config(object):
     data_path = r'D:\Caiyimin\Dataset\BTCV_Abdomen\RawData\Training'
-    ResamplePixDim = (1.0, 1.0, 1.5)  # 原始采样分辨率是(1.5,1.5,2.0)
+    ValidSegDir = r'D:\Caiyimin\Dataset\BTCV_Abdomen\ValidSeg'
+    Seed = 42
+    ResamplePixDim = (1.5, 1.5, 1.5)  # 原始采样分辨率是(1.5,1.5,2.0)
     # 采样间隔为1mm,数据尺寸中位数为[388.  388.  441.5]
     FinalShape = [160, 160, 160]
-    window_size = [5, 5, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    window_size = [i // 32 for i in FinalShape]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 1
     SampleN = 2
 
@@ -79,17 +80,38 @@ class Config(object):
 
     n_classes = 14  #
 
-    lr = 1e-4  # 学习率
+    lr = 3e-4  # 学习率
 
-    # back_bone_name = 'SwinUnet'
-    back_bone_name = 'Unet3D'
-    # back_bone_name = 'UnetR'
+    MinEpoch = 1000
+    MaxEpoch = 5000
+
+    model_name = 'SwinUnet3D'
+    # model_name = 'Unet3D'
+    # model_name = 'VNet'
+    # model_name = 'UNetR'
+
+    ModelDict = {}
+    ArgsDict = {}
+
+    ModelDict['Unet3D'] = UNet
+    ArgsDict['Unet3D'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes,
+                          'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
+
+    ModelDict['VNet'] = VNet
+    ArgsDict['VNet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes, 'dropout_prob': 0.0, }
+
+    ModelDict['UNetR'] = UNETR
+    ArgsDict['UNetR'] = {'in_channels': in_channels, 'out_channels': n_classes, 'img_size': FinalShape}
+
+    ModelDict['SwinUnet3D'] = swinUnet_t_3D
+    ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
 
     # 滑动窗口推理时使用
     roi_size = FinalShape
     slid_window_overlap = 0.25
 
-    check_val_every_n_epoch = 20  # 多少个epoch进行验证集测试一次
+    check_val_every_n_epoch = 5  # 多少个epoch进行验证集测试一次
+
     patience = 10
 
 
@@ -170,7 +192,7 @@ class BTCVDataset(pl.LightningDataModule):
             RandRotate90d(keys=['image', 'label'], prob=0.1, max_k=3),
 
             RandScaleIntensityd(keys='image', factors=0.1, prob=0.1),
-            RandShiftIntensityd(keys='image', offsets=0.1, prob=0.5),
+            RandShiftIntensityd(keys='image', offsets=0.1, prob=0.1),
 
             EnsureTyped(keys=['image', 'label']),
         ])
@@ -185,8 +207,6 @@ class BTCVDataset(pl.LightningDataModule):
 
             ScaleIntensityRanged(keys='image', a_min=cfg.HuMin, a_max=cfg.HuMax,
                                  b_min=0.0, b_max=1.0, clip=True),
-
-            # CropForegroundd(keys=['image', 'label'], source_key='image'),
 
             EnsureTyped(keys=['image', 'label']),
         ])
@@ -209,28 +229,21 @@ class BTCVDataset(pl.LightningDataModule):
             val_num += remain
 
         self.train_dict, self.val_dict, self.test_dict \
-            = random_split(self.train_dict, [train_num, val_num, test_num])
+            = random_split(self.train_dict, [train_num, val_num, test_num],
+                           generator=torch.Generator().manual_seed(cfg.Seed)
+                           )
 
 
 class BTCV(pl.LightningModule):
     def __init__(self, cfg=Config()):
         super(BTCV, self).__init__()
         self.cfg = cfg
-        if cfg.back_bone_name == 'SwinUnet':
-            self.net = swinUnet_t_3D(window_size=cfg.window_size,
-                                     num_classes=cfg.n_classes,
-                                     in_channel=cfg.in_channels, )
-        else:
-            from monai.networks.nets import UNETR, UNet
-            if cfg.back_bone_name == 'UnetR':
-                self.net = UNETR(in_channels=cfg.in_channels,
-                                 out_channels=cfg.n_classes,
-                                 img_size=cfg.FinalShape)
-            else:
-                self.net = UNet(spatial_dims=3, in_channels=1,
-                                out_channels=cfg.n_classes,
-                                channels=(32, 64, 128, 256, 512),
-                                strides=(2, 2, 2, 2))
+
+        model = cfg.ModelDict[cfg.model_name]
+        args = cfg.ArgsDict[cfg.model_name]
+        self.net = model(**args)
+        if cfg.model_name != 'SwinUnet3D':  # Monai中的模型缺乏参数初始化，不加参数初始化容易导致某些通道的dice系数爆零
+            self.net = ModelParamInit(self.net)
 
         self.loss_func = DiceCELoss(to_onehot_y=True, softmax=True)
         self.metrics = DiceMetric(include_background=False,
@@ -238,11 +251,11 @@ class BTCV(pl.LightningModule):
                                   get_not_nans=False)
         self.post_pred = Compose([
             EnsureType(),
-            AsDiscrete(argmax=True, to_onehot=True, num_classes=cfg.n_classes)
+            AsDiscrete(argmax=True, to_onehot=cfg.n_classes)
         ])
         self.post_label = Compose([
             EnsureType(),
-            AsDiscrete(to_onehot=True, num_classes=cfg.n_classes)
+            AsDiscrete(to_onehot=cfg.n_classes)
         ])
 
     def configure_optimizers(self):
@@ -257,7 +270,6 @@ class BTCV(pl.LightningModule):
         # return opt
 
     def training_step(self, batch, batch_idx):
-
         x = batch['image']
         y = batch['label']
         y_hat = self.net(x)
@@ -266,18 +278,31 @@ class BTCV(pl.LightningModule):
         self.log('train_loss', loss, prog_bar=True)
         return {'loss': loss}
 
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        self.eval()
         cfg = self.cfg
         x = batch['image']
         y = batch['label']
-        y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize, predictor=self.net,
+        y_hat = sliding_window_inference(x, roi_size=cfg.FinalShape, sw_batch_size=cfg.BatchSize,
+                                         predictor=self.net,
                                          overlap=cfg.slid_window_overlap)
         loss, mean_dice = self.shared_step(y_hat=y_hat, y=y)
+        # if mean_dice > 0.65:
+        meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+        for k, v in meta_dict.items():
+            if isinstance(v, torch.Tensor):
+                meta_dict[k] = v.detach().cpu()
+        saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+        y_hat = torch.argmax(y_hat, dim=1, keepdim=True)
+        saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
         self.log('valid_mean_dice', mean_dice, prog_bar=True)
         self.log('valid_loss', loss, prog_bar=True)
         return {'loss': loss}
 
+    @torch.no_grad()
     def test_step(self, batch, batch_idx):
+        self.eval()
         cfg = self.cfg
         x = batch['image']
         y = batch['label']
@@ -340,37 +365,57 @@ class BTCV(pl.LightningModule):
         return loss, dice
 
 
-cfg = Config()
+def ModelParamInit(model):
+    assert isinstance(model, nn.Module)
+    for m in model.modules():
+        if isinstance(m, (nn.Conv3d, nn.ConvTranspose3d, nn.Linear)):
+            trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm3d)):
+            if m.weight is not None:
+                nn.init.constant_(m.weight, 1.0)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    return model
 
-data = BTCVDataset()
-model = BTCV()
 
-early_stop = EarlyStopping(
-    monitor='valid_epoch_mean_loss',
-    patience=cfg.patience,
-)
+def main():
+    cfg = Config()
 
-check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.back_bone_name}',
-                              save_last=False,
-                              save_top_k=2, monitor='valid_epoch_mean_loss', verbose=True,
-                              filename='{epoch}-{valid_loss:.2f}-{valid_epoch_mean_dice:.2f}')
-trainer = pl.Trainer(
-    progress_bar_refresh_rate=10,
-    max_epochs=5000,
-    min_epochs=1300,
-    gpus=1,
-    # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
+    data = BTCVDataset()
+    model = BTCV()
 
-    # auto_lr_find=True,
-    auto_scale_batch_size=True,
-    logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.back_bone_name}'),
-    callbacks=[early_stop, check_point],
-    precision=16,
-    accumulate_grad_batches=4,
-    num_sanity_val_steps=0,
-    log_every_n_steps=10,
-    auto_lr_find=True,
-    gradient_clip_val=0.5,
-    check_val_every_n_epoch=cfg.check_val_every_n_epoch,
-)
-trainer.fit(model, data)
+    early_stop = EarlyStopping(
+        monitor='valid_epoch_mean_loss',
+        patience=cfg.patience,
+    )
+
+    check_point = ModelCheckpoint(dirpath=f'./trained_models/{cfg.model_name}',
+                                  save_last=False,
+                                  save_top_k=2, monitor='valid_epoch_mean_loss', verbose=True,
+                                  filename='{epoch}-{valid_loss:.2f}-{valid_epoch_mean_dice:.2f}')
+    trainer = pl.Trainer(
+        progress_bar_refresh_rate=10,
+        max_epochs=cfg.MaxEpoch,
+        min_epochs=cfg.MinEpoch,
+        gpus=1,
+        # auto_select_gpus=True, # 这个参数针对混合精度训练时，不能使用
+
+        # auto_lr_find=True,
+        auto_scale_batch_size=True,
+        logger=TensorBoardLogger(save_dir=f'./logs', name=f'{cfg.model_name}'),
+        callbacks=[early_stop, check_point],
+        precision=16,
+        accumulate_grad_batches=4,
+        num_sanity_val_steps=0,
+        log_every_n_steps=5,
+        auto_lr_find=True,
+        gradient_clip_val=0.5,
+        check_val_every_n_epoch=cfg.check_val_every_n_epoch,
+    )
+    trainer.fit(model, data)
+
+
+if __name__ == '__main__':
+    main()
