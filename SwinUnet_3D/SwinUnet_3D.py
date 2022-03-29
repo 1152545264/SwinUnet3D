@@ -362,7 +362,6 @@ class StageModuleDownScaling3D(nn.Module):
         return x
 
 
-# 上采样的时候不计算token之间的注意力
 class StageModuleUpScaling3D(nn.Module):
     def __init__(self, in_dims, out_dims, layers, up_scaling_factor, num_heads, head_dim,
                  window_size: Union[int, List[int]], relative_pos_embedding, dropout: float = 0.0):
@@ -460,9 +459,6 @@ class SwinUnet3D(nn.Module):
                                                  downscaling_factor=downscaling_factors[3], num_heads=heads[3],
                                                  head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                  relative_pos_embedding=relative_pos_embedding)
-
-        # 线性层之间的变换开销太大
-        # self.upstage5 = nn.Conv3d(in_channels=hidden_dim * 8, out_channels=hidden_dim * 8, kernel_size=1, stride=1)
 
         self.up_stage4 = StageModuleUpScaling3D(in_dims=hidden_dim * 8, out_dims=hidden_dim * 4,
                                                 layers=layers[2],
