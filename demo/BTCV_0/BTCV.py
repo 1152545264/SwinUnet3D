@@ -245,7 +245,7 @@ class BTCV(pl.LightningModule):
         if cfg.model_name != 'SwinUnet3D':  # Monai中的模型缺乏参数初始化，不加参数初始化容易导致某些通道的dice系数爆零
             self.net = ModelParamInit(self.net)
 
-        self.loss_func = DiceCELoss(to_onehot_y=True, softmax=True)
+        self.loss_func = DiceLoss(to_onehot_y=True, softmax=True)
         self.metrics = DiceMetric(include_background=False,
                                   reduction='mean_batch',
                                   get_not_nans=False)

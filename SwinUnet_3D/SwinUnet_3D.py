@@ -181,7 +181,7 @@ class WindowAttention3D(nn.Module):
             self.z_mask = nn.Parameter(create_mask3D(window_size=window_size, displacement=displacement,
                                                      x_shift=False, y_shift=False, z_shift=True), requires_grad=False)
 
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=True)  # QKV三个
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)  # QKV三个
 
         if self.relative_pos_embedding:
             self.relative_indices = get_relative_distances(window_size)
@@ -300,9 +300,9 @@ class PatchExpand3D(nn.Module):
         self.net = nn.Sequential(
             Rearrange('b c h_s w_s d_s -> b h_s w_s d_s c'),
             nn.Linear(in_dim, fc_dim),
+            nn.LayerNorm(fc_dim),
             Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b  (h_s fac1) (w_s fac2) (d_s fac3) c',
                       fac1=self.usf, fac2=self.usf, fac3=self.usf),
-            nn.LayerNorm(out_dim),
         )
 
     def forward(self, x):
@@ -320,9 +320,9 @@ class FinalExpand3D(nn.Module):  # 体素最终分类时使用
         self.net = nn.Sequential(
             Rearrange('b c h_s w_s d_s -> b h_s w_s d_s c'),
             nn.Linear(in_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b  (h_s fac1) (w_s fac2) (d_s fac3) c',
                       fac1=self.usf, fac2=self.usf, fac3=self.usf),
-            nn.LayerNorm(out_dim),
         )
 
     def forward(self, x):
@@ -434,7 +434,8 @@ class Converge(nn.Module):
 class SwinUnet3D(nn.Module):
     def __init__(self, *, hidden_dim, layers, heads, in_channel=1, num_classes=2, head_dim=32,
                  window_size: Union[int, List[int]] = 7, downscaling_factors=(4, 2, 2, 2),
-                 relative_pos_embedding=True, dropout: float = 0.0, skip_style='stack'):
+                 relative_pos_embedding=True, dropout: float = 0.0, skip_style='stack',
+                 stl_channels: int = 64):  # second_to_last_channels
         super().__init__()
 
         self.dsf = downscaling_factors
@@ -490,13 +491,11 @@ class SwinUnet3D(nn.Module):
         self.converge3 = Converge(hidden_dim * 4, hidden_dim * 2, stack, add)
         self.converge12 = Converge(hidden_dim * 2, hidden_dim, stack, add)
 
-        self.final = FinalExpand3D(in_dim=hidden_dim, out_dim=hidden_dim,
+        self.final = FinalExpand3D(in_dim=hidden_dim, out_dim=stl_channels,
                                    up_scaling_factor=downscaling_factors[0])
         self.out = nn.Sequential(
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(stl_channels, num_classes),
             Rearrange('b h w d c -> b c h w d'),
-
-            # nn.Conv3d(hidden_dim, num_classes, stride=1, kernel_size=1, bias=False)
         )
         # 参数初始化
         self.init_weight()

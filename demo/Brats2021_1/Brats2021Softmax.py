@@ -25,7 +25,6 @@ from monai.networks.nets import UNETR, UNet, VNet  # , DynUNet,SegResNet
 from monai.networks.nets import TopologySearch
 from MedicalZooPytorch.lib.medzoo import ResNet3DMedNet, DenseVoxelNet, SkipDenseNet3D
 from SwinUnet_3D import swinUnet_t_3D
-from ConUnext3D import convnext_tiny
 from monai.transforms import (
     Activations,
     Activationsd,
@@ -112,8 +111,6 @@ class Config(object):
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
-    ModelDict['ConvUext3D'] = convnext_tiny
-    ArgsDict['ConvUext3D'] = {'in_channels': 4, 'num_classes': 3}
 
     # NeedTrain = False
     NeedTrain = True

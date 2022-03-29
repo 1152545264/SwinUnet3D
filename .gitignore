@@ -5,4 +5,4 @@
 *.ckpt
 *.png
 venv_w
-/MedicalZooPytorch/
+MedicalZooPytorch
