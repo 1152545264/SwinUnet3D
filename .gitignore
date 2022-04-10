@@ -6,3 +6,4 @@
 *.png
 venv_w
 MedicalZooPytorch
+ConUnext3D.py

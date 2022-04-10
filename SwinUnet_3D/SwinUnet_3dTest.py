@@ -51,6 +51,11 @@ def testSwinUnet3D():
     y = seg(x)
     print(y.shape)
     print(seg)
+    # from monai.networks.nets import UNETR, UNet, VNet  # , DynUNet,SegResNet
+    # kwargs = {'spatial_dims': 3, 'in_channels': 3, 'out_channels': 2,
+    #                       'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
+    # model = UNet(**kwargs)
+    # # print(model)
 
 
 if __name__ == '__main__':

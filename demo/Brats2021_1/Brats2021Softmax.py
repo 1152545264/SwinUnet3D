@@ -23,7 +23,7 @@ from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
 from monai.networks.nets import UNETR, UNet, VNet  # , DynUNet,SegResNet
 from monai.networks.nets import TopologySearch
-from MedicalZooPytorch.lib.medzoo import ResNet3DMedNet, DenseVoxelNet, SkipDenseNet3D
+from ConUnext3D import convnext_tiny
 from SwinUnet_3D import swinUnet_t_3D
 from monai.transforms import (
     Activations,
@@ -93,12 +93,10 @@ class Config(object):
     # model_name = 'Unet3D'
     # model_name = 'VNet'
     # model_name = 'UNetR'
-
-    # model_name = 'ConvUext3D'
+    # model_name = 'ConUnext'
 
     ModelDict = {}
     ArgsDict = {}
-
     ModelDict['Unet3D'] = UNet
     ArgsDict['Unet3D'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes,
                           'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
@@ -111,6 +109,9 @@ class Config(object):
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
+
+    ModelDict['ConUnext'] = convnext_tiny
+    ArgsDict['ConUnext'] = {'in_chans': in_channels, 'num_classes': n_classes}
 
     # NeedTrain = False
     NeedTrain = True
@@ -232,7 +233,7 @@ class Brats2021DataSet(pl.LightningDataModule):
 
     def val_dataloader(self):
         cfg = self.cfg
-        return DataLoader(self.val_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=True)
+        return DataLoader(self.val_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=False)
 
     def predict_dataloader(self):
         cfg = self.cfg
