@@ -1,6 +1,5 @@
 import torch
 from torch import nn, einsum
-from torch.nn import functional as F
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from typing import Union, List
@@ -257,7 +256,7 @@ class PatchMerging3D(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv3d(in_dim, out_dim, kernel_size=downscaling_factor, stride=downscaling_factor),
-            Norm(dim=out_dim)
+            Norm(dim=out_dim),
         )
 
     def forward(self, x):
@@ -275,15 +274,23 @@ class PatchExpand3D(nn.Module):
         #     nn.Conv3d(in_dim, out_dim, kernel_size=1, stride=1),
         #     Norm(out_dim)
         # )
-        self.usf = up_scaling_factor
-        hidden_dim = (up_scaling_factor ** 3) * out_dim
+
+        # self.usf = up_scaling_factor
+        # hidden_dim = (up_scaling_factor ** 3) * out_dim
+        # self.net = nn.Sequential(
+        #     Rearrange('b c h w d -> b h w d c'),
+        #     nn.Linear(in_dim, hidden_dim),
+        #     Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b c (h_s fac1) (w_s fac2) (d_s fac3)',
+        #               fac1=self.usf, fac2=self.usf, fac3=self.usf),
+        #     Norm(out_dim),
+        # )
+
+        stride = up_scaling_factor
+        kernel_size = up_scaling_factor
+        padding = (kernel_size - stride) // 2
         self.net = nn.Sequential(
-            Rearrange('b c h w d -> b h w d c'),
-            nn.Linear(in_dim, hidden_dim),
-            Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b c (h_s fac1) (w_s fac2) (d_s fac3)',
-                      fac1=self.usf, fac2=self.usf, fac3=self.usf),
+            nn.ConvTranspose3d(in_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=padding),
             Norm(out_dim),
-            nn.PReLU()
         )
 
     def forward(self, x):
@@ -295,15 +302,30 @@ class PatchExpand3D(nn.Module):
 class FinalExpand3D(nn.Module):  # 体素最终分类时使用
     def __init__(self, in_dim, out_dim, up_scaling_factor):  # stl为second_to_last的缩写
         super(FinalExpand3D, self).__init__()
-        self.usf = up_scaling_factor  # 2 或者 4
+
+        # self.net = nn.Sequential(
+        #     nn.Upsample(scale_factor=up_scaling_factor, mode="trilinear", align_corners=False), # UpSample显存占用过大
+        #     nn.Conv3d(in_dim, out_dim, kernel_size=1, stride=1),
+        #     Norm(out_dim)
+        # )
 
         # H, W, D, out_dims -> H, W, D, (down_scaling ** 3) * out_dims
-        hidden_dim = (up_scaling_factor ** 3) * out_dim
+        # self.usf = up_scaling_factor  # 2 或者 4
+        # hidden_dim = (up_scaling_factor ** 3) * out_dim
+        # self.net = nn.Sequential(
+        #     Rearrange('b c h w d -> b h w d c'),
+        #     nn.Linear(in_dim, hidden_dim),
+        #     Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b c (h_s fac1) (w_s fac2) (d_s fac3)',
+        #               fac1=self.usf, fac2=self.usf, fac3=self.usf),
+        #     Norm(out_dim),
+        #     nn.PReLU()
+        # )
+
+        stride = up_scaling_factor
+        kernel_size = up_scaling_factor
+        padding = (kernel_size - stride) // 2
         self.net = nn.Sequential(
-            Rearrange('b c h w d -> b h w d c'),
-            nn.Linear(in_dim, hidden_dim),
-            Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b c (h_s fac1) (w_s fac2) (d_s fac3)',
-                      fac1=self.usf, fac2=self.usf, fac3=self.usf),
+            nn.ConvTranspose3d(in_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=padding),
             Norm(out_dim),
             nn.PReLU()
         )
@@ -315,11 +337,16 @@ class FinalExpand3D(nn.Module):  # 体素最终分类时使用
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, hidden_dimension):
+    def __init__(self, in_ch, out_ch):
         super(ConvBlock, self).__init__()
+        groups = min(in_ch, out_ch)
         self.net = nn.Sequential(
-            nn.Conv3d(hidden_dimension, hidden_dimension, kernel_size=1),
-            Norm(dim=hidden_dimension),
+            nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, groups=groups),
+            Norm(dim=out_ch),
+            nn.PReLU(),
+
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, groups=groups),
+            Norm(dim=out_ch),
             nn.PReLU(),
         )
 
@@ -336,6 +363,7 @@ class StageModuleDownScaling3D(nn.Module):
 
         self.patch_partition = PatchMerging3D(in_dim=in_dims, out_dim=hidden_dimension,
                                               downscaling_factor=downscaling_factor)
+        self.conv_block = ConvBlock(in_ch=hidden_dimension, out_ch=hidden_dimension)
 
         self.re1 = Rearrange('b c h w d -> b h w d c')
         self.swin_layers = nn.ModuleList([])
@@ -352,13 +380,15 @@ class StageModuleDownScaling3D(nn.Module):
 
     def forward(self, x):
         x = self.patch_partition(x)
+        x2 = self.conv_block(x)  # 卷积块学习短距离依赖
 
         x = self.re1(x)
-        for regular_block, shifted_block in self.swin_layers:
+        for regular_block, shifted_block in self.swin_layers:  # swin_layers块学习长距离依赖
             x = regular_block(x)
             x = shifted_block(x)
         x = self.re2(x)
 
+        x = x + x2  # 对长短距离依赖信息进行融合
         return x
 
 
@@ -370,6 +400,8 @@ class StageModuleUpScaling3D(nn.Module):
 
         self.patch_expand = PatchExpand3D(in_dim=in_dims, out_dim=out_dims,
                                           up_scaling_factor=up_scaling_factor)
+
+        self.conv_block = ConvBlock(in_ch=out_dims, out_ch=out_dims)
         self.re1 = Rearrange('b c h w d -> b h w d c')
         self.swin_layers = nn.ModuleList([])
         for _ in range(layers // 2):
@@ -381,10 +413,12 @@ class StageModuleUpScaling3D(nn.Module):
                             shifted=True, window_size=window_size, relative_pos_embedding=relative_pos_embedding,
                             dropout=dropout),
             ]))
-        self.re2 = Rearrange('b  h w d c -> b c h w d')
+        self.re2 = Rearrange('b h w d c -> b c h w d')
 
     def forward(self, x):
         x = self.patch_expand(x)
+
+        x2 = self.conv_block(x)
 
         x = self.re1(x)
         for regular_block, shifted_block in self.swin_layers:
@@ -392,6 +426,7 @@ class StageModuleUpScaling3D(nn.Module):
             x = shifted_block(x)
         x = self.re2(x)
 
+        x = x + x2
         return x
 
 
@@ -447,20 +482,19 @@ class SwinUnet3D(nn.Module):
 
         self.up_stage4 = StageModuleUpScaling3D(in_dims=hidden_dim * 8, out_dims=hidden_dim * 4,
                                                 layers=layers[2],
-                                                up_scaling_factor=downscaling_factors[2], num_heads=heads[2],
+                                                up_scaling_factor=downscaling_factors[3], num_heads=heads[2],
                                                 head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                 relative_pos_embedding=relative_pos_embedding)
 
         self.up_stage3 = StageModuleUpScaling3D(in_dims=hidden_dim * 4, out_dims=hidden_dim * 2,
                                                 layers=layers[1],
-                                                up_scaling_factor=downscaling_factors[1], num_heads=heads[1],
+                                                up_scaling_factor=downscaling_factors[2], num_heads=heads[1],
                                                 head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                 relative_pos_embedding=relative_pos_embedding)
 
-        # 注意此处的up_scaling_facto为2，而不是down_scaling_factor[1]
         self.up_stage12 = StageModuleUpScaling3D(in_dims=hidden_dim * 2, out_dims=hidden_dim,
                                                  layers=layers[0],
-                                                 up_scaling_factor=2, num_heads=heads[0],
+                                                 up_scaling_factor=downscaling_factors[1], num_heads=heads[0],
                                                  head_dim=head_dim, window_size=window_size, dropout=dropout,
                                                  relative_pos_embedding=relative_pos_embedding)
 
