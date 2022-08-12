@@ -63,14 +63,14 @@ class Config(object):
     data_path = r'D:\Caiyimin\Dataset\MSD\Pancreas'
 
     FinalShape = [160, 160, 160]
-    window_size = [5, 5, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    window_size = [it // 32 for it in FinalShape]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 1
 
     # 数据集原始尺寸(体素间距为1.0时)中位数为(411,411,240)
     # 体素间距为1时，z轴最小尺寸为127，最大为499
-    ResamplePixDim = (2.0, 2.0, 1.0)
-    HuMax = 50 + 350 / 2
-    HuMin = 35 - 350 / 2
+    ResamplePixDim = (1.5, 1.5, 2.0)
+    HuMax = -57
+    HuMin = 164
     low_percent = 0.5
     upper_percent = 99.5
 
@@ -180,7 +180,6 @@ class LitsDataSet(pl.LightningDataModule):
         self.train_process = Compose([
             LoadImaged(keys=['image', 'label']),
             EnsureChannelFirstd(keys=['image']),
-            ConvertLabeld(keys='label'),
 
             Spacingd(keys=['image', 'label'], pixdim=cfg.ResamplePixDim,
                      mode=('bilinear', 'nearest')),

@@ -18,12 +18,41 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
 from torch.utils.data import random_split
 from SwinUnet_3D import swinUnet_t_3D
-from monai.losses import DiceLoss, DiceFocalLoss, GeneralizedDiceLoss
+from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss, FocalLoss, GeneralizedDiceLoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
-from monai.networks.nets import UNETR, UNet, VNet, RegUNet, DynUNet, SegResNet, DiNTS
 from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
-from monai.data import decollate_batch
+from monai.data import decollate_batch, list_data_collate
+from monai.networks.nets import UNETR, UNet, VNet
+from timm.models.layers import trunc_normal_
+from monai.data import NiftiSaver
+from monai.transforms import (
+    Activations,
+    Activationsd,
+    AsDiscrete,
+    AsDiscreted,
+    Compose,
+    Invertd,
+    LoadImaged,
+    MapTransform,
+    NormalizeIntensityd,
+    Orientationd,
+    RandFlipd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    RandSpatialCropd,
+    Spacingd,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    EnsureType,
+    SpatialPadd,
+    ScaleIntensityRangePercentilesd,
+    ScaleIntensityRanged,
+    CropForegroundd,
+    RandCropByPosNegLabeld,
+    RandRotate90d,
+    RandCropByLabelClassesd
+)
 
 pl.seed_everything(42)
 set_determinism(42)
@@ -32,12 +61,13 @@ set_determinism(42)
 class Config(object):
     data_path = r'D:\Caiyimin\Dataset\MSD\lung'
 
-    FinalShape = [160, 160, 160]  # 尺寸中位数为512,512,252
-    window_size = [5, 5, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    FinalShape = [96, 96, 96]  # 尺寸中位数为512,512,252
+    window_size = [it // 32 for it in FinalShape]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 1
 
     OriginPixDim = (0.7, 0.7, 1.0)
     ResamplePixDim = (1.5, 1.5, 2.0)
+    num_samples = 4
 
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
@@ -50,8 +80,8 @@ class Config(object):
 
     lr = 3e-4  # 学习率
 
-    back_bone_name = 'SwinUnet'
-    # back_bone_name = 'Unet3D'
+    # back_bone_name = 'SwinUnet'
+    back_bone_name = 'Unet3D'
     # back_bone_name = 'UnetR'
 
     # 滑动窗口推理时使用
@@ -111,7 +141,8 @@ class LitsDataSet(pl.LightningDataModule):
 
     def train_dataloader(self):
         cfg = self.cfg
-        return DataLoader(self.train_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers)
+        return DataLoader(self.train_set, batch_size=cfg.BatchSize,
+                          num_workers=cfg.NumWorkers, collate_fn=list_data_collate)
 
     def val_dataloader(self):
         cfg = self.cfg
@@ -125,35 +156,41 @@ class LitsDataSet(pl.LightningDataModule):
         cfg = self.cfg
         self.train_process = Compose([
             LoadImaged(keys=['image', 'seg']),
-            transforms.EnsureChannelFirstd(keys=['image', 'seg']),
+            EnsureChannelFirstd(keys=['image', 'seg']),
 
-            transforms.Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim,
-                                mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
+            Orientationd(keys=['image', 'seg'], axcodes='RAS'),
+            Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim,
+                     mode=['bilinear', 'nearest']),
 
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.lower, upper=cfg.upper, b_min=0.0,
-                                                       b_max=1.0, clip=True),
-            transforms.RandSpatialCropd(keys=['image', 'seg'], roi_size=cfg.FinalShape, random_size=False),
-            transforms.SpatialPadd(keys=['image', 'seg'], spatial_size=cfg.FinalShape),
+            ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.lower, upper=cfg.upper, b_min=0.0,
+                                            b_max=1.0, clip=True),
 
-            transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=0),
-            transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=1),
-            transforms.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=2),
+            # RandSpatialCropd(keys=['image', 'seg'], roi_size=cfg.FinalShape,
+            #                  random_size=False),
 
-            transforms.ToTensord(keys=['image', 'seg']),
+            RandCropByLabelClassesd(keys=['image', 'seg'], label_key='seg',
+                                    spatial_size=cfg.FinalShape, ratios=(1, 1),
+                                    num_classes=cfg.n_classes, num_samples=cfg.num_samples,
+                                    image_key='image'),
+
+            RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=2),
+
+            EnsureTyped(keys=['image', 'seg']),
 
         ])
 
         self.val_process = Compose([
             LoadImaged(keys=['image', 'seg']),
-            transforms.EnsureChannelFirstd(keys=['image', 'seg']),
+            EnsureChannelFirstd(keys=['image', 'seg']),
+            Orientationd(keys=['image', 'seg'], axcodes='RAS'),
+            Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim,
+                     mode=['bilinear', 'nearest']),
 
-            transforms.Spacingd(keys=['image', 'seg'], pixdim=cfg.ResamplePixDim, mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'seg'], axcodes='RAS'),
-
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.lower, upper=cfg.upper, b_min=0.0,
-                                                       b_max=1.0, clip=True),
-            transforms.ToTensord(keys=['image', 'seg']),
+            ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.lower, upper=cfg.upper, b_min=0.0,
+                                            b_max=1.0, clip=True),
+            EnsureTyped(keys=['image', 'seg']),
         ])
 
     def get_init(self):
