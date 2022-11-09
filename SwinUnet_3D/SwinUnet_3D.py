@@ -269,22 +269,6 @@ class PatchExpand3D(nn.Module):
     def __init__(self, in_dim, out_dim, up_scaling_factor):
         super(PatchExpand3D, self).__init__()
 
-        # self.net = nn.Sequential(
-        #     nn.Upsample(scale_factor=up_scaling_factor, mode="trilinear", align_corners=False), # UpSample显存占用过大
-        #     nn.Conv3d(in_dim, out_dim, kernel_size=1, stride=1),
-        #     Norm(out_dim)
-        # )
-
-        # self.usf = up_scaling_factor
-        # hidden_dim = (up_scaling_factor ** 3) * out_dim
-        # self.net = nn.Sequential(
-        #     Rearrange('b c h w d -> b h w d c'),
-        #     nn.Linear(in_dim, hidden_dim),
-        #     Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b c (h_s fac1) (w_s fac2) (d_s fac3)',
-        #               fac1=self.usf, fac2=self.usf, fac3=self.usf),
-        #     Norm(out_dim),
-        # )
-
         stride = up_scaling_factor
         kernel_size = up_scaling_factor
         padding = (kernel_size - stride) // 2
@@ -302,24 +286,6 @@ class PatchExpand3D(nn.Module):
 class FinalExpand3D(nn.Module):  # 体素最终分类时使用
     def __init__(self, in_dim, out_dim, up_scaling_factor):  # stl为second_to_last的缩写
         super(FinalExpand3D, self).__init__()
-
-        # self.net = nn.Sequential(
-        #     nn.Upsample(scale_factor=up_scaling_factor, mode="trilinear", align_corners=False), # UpSample显存占用过大
-        #     nn.Conv3d(in_dim, out_dim, kernel_size=1, stride=1),
-        #     Norm(out_dim)
-        # )
-
-        # H, W, D, out_dims -> H, W, D, (down_scaling ** 3) * out_dims
-        # self.usf = up_scaling_factor  # 2 或者 4
-        # hidden_dim = (up_scaling_factor ** 3) * out_dim
-        # self.net = nn.Sequential(
-        #     Rearrange('b c h w d -> b h w d c'),
-        #     nn.Linear(in_dim, hidden_dim),
-        #     Rearrange('b h_s w_s d_s (fac1 fac2 fac3 c) -> b c (h_s fac1) (w_s fac2) (d_s fac3)',
-        #               fac1=self.usf, fac2=self.usf, fac3=self.usf),
-        #     Norm(out_dim),
-        #     nn.PReLU()
-        # )
 
         stride = up_scaling_factor
         kernel_size = up_scaling_factor
@@ -351,7 +317,8 @@ class ConvBlock(nn.Module):
         )
 
     def forward(self, x):
-        x = self.net(x)
+        x2 = x.clone()
+        x = self.net(x) * x2
         return x
 
 

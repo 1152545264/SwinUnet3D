@@ -21,10 +21,10 @@ from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
-from monai.networks.nets import UNETR, UNet, VNet  # , DynUNet,SegResNet
+from monai.networks.nets import UNETR, UNet, VNet, DynUNet, SegResNet, SwinUNETR, AttentionUnet, DiNTS
+from OthersModel.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS, BTS
 from monai.networks.nets import TopologySearch
-from ConUnext3D import convnext_tiny
-from SwinUnet_3D import swinUnet_t_3D
+
 from monai.transforms import (
     Activations,
     Activationsd,
@@ -50,30 +50,53 @@ from monai.transforms import (
 )
 from timm.models.layers import trunc_normal_
 
+from SwinUnet_3D import swinUnet_t_3D
+from OthersModel.Swin_BTS.SwinUnet import swinunetr
+
 
 def setseed(seed: int = 42):
     pl.seed_everything(seed)
     set_determinism(seed)
 
 
+def get_nnunet_k_s(final_shape, spacings):  #
+    sizes, spacings = final_shape, spacings
+    input_size = sizes
+    strides, kernels = [], []
+    while True:
+        spacing_ratio = [sp / min(spacings) for sp in spacings]
+        stride = [
+            2 if ratio <= 2 and size >= 8 else 1
+            for (ratio, size) in zip(spacing_ratio, sizes)
+        ]
+        kernel = [3 if ratio <= 2 else 1 for ratio in spacing_ratio]
+        if all(s == 1 for s in stride):
+            break
+        for idx, (i, j) in enumerate(zip(sizes, stride)):
+            if i % j != 0:
+                raise ValueError(
+                    f"Patch size is not supported, please try to modify the size {input_size[idx]} in the spatial dimension {idx}."
+                )
+        sizes = [i / j for i, j in zip(sizes, stride)]
+        spacings = [i * j for i, j in zip(spacings, stride)]
+        kernels.append(kernel)
+        strides.append(stride)
+
+    strides.insert(0, len(spacings) * [1])
+    kernels.append(len(spacings) * [3])
+    return kernels, strides
+
+
 class Config(object):
     seed = 42  # 设置随机数种子
+    spacings = [1.0, 1.0, 1.0]
     # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
-    RoiSize = [256, 256, 160]
-    window_size = [8, 8, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    # RoiSize = [256 // spacings[0], 256 // spacings[1], 160 // spacings[2]]
+    # RoiSize = [int(it) for it in RoiSize]
+
+    RoiSize = [128, 128, 128]
+    window_size = [it // 32 for it in RoiSize]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 4
-
-    l_percent = 0.5
-    u_percent = 99.5
-
-    train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
-    BatchSize = 1
-    NumWorkers = 0  # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
-
-    max_epoch = 400
-    min_epoch = 50
-
-    LRCycle = 10
     '''
     标签中绿色为浮肿区域(ED,peritumoral edema) (标签2)、黄色为增强肿瘤区域(ET,enhancing tumor)(标签4)、
     红色为坏疽(NET,non-enhancing tumor)(标签1)、背景(标签0)
@@ -83,17 +106,37 @@ class Config(object):
     '''
     n_classes = 3  # 分割总的类别数，在三个通道上分别进行前景和背景的分割，三个通道为：TC（肿瘤核心）、ET（肿瘤增强)和WT（整个肿瘤）。
 
-    lr = 3e-4  # 学习率
+    l_percent = 0.5
+    u_percent = 99.5
+
+    train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
+    BatchSize = 1
+    NumWorkers = 1  # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
+
+    max_epoch = 300
+    min_epoch = 50
+
+    LRCycle = 10
+
+    # lr = 3e-4  # 学习率
+    lr = 1e-3  # 学习率
 
     # 滑动窗口推理时使用
     roi_size = RoiSize
-    overlap = 0.0
+    overlap = 0.125
 
-    model_name = 'SwinUnet3D'
     # model_name = 'Unet3D'
-    # model_name = 'VNet'
+    model_name = 'VNet'
+    # model_name = 'SwinUnet3D'
+
     # model_name = 'UNetR'
-    # model_name = 'ConUnext'
+    # model_name = 'SwinBTS'
+    # model_name = 'TransBTS'
+
+    # model_name = 'SwinUNETR'
+    # if model_name == 'TransBTS':
+    #     roi_size = RoiSize = [128, 128, 128]
+    #     overlap = 0.125
 
     ModelDict = {}
     ArgsDict = {}
@@ -107,19 +150,33 @@ class Config(object):
     ModelDict['UNetR'] = UNETR
     ArgsDict['UNetR'] = {'in_channels': in_channels, 'out_channels': n_classes, 'img_size': RoiSize}
 
+    ModelDict['SwinUNETR'] = SwinUNETR
+    ArgsDict['SwinUNETR'] = {'in_channels': in_channels, 'out_channels': n_classes, 'img_size': RoiSize}
+
+    ModelDict['SwinBTS'] = swinunetr
+    ArgsDict['SwinBTS'] = {'image_size': 128, 'patch_size': 4, 'in_chans': in_channels, 'num_lables': n_classes}
+
+    ModelDict['TransBTS'] = BTS
+    ArgsDict['TransBTS'] = {'img_dim': 128, 'patch_dim': 8, 'num_channels': in_channels,
+                            'num_classes': n_classes,
+                            'embedding_dim': 512,
+                            'num_heads': 8,
+                            'num_layers': 4,
+                            'hidden_dim': 4096,
+                            }
+
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
-
-    ModelDict['ConUnext'] = convnext_tiny
-    ArgsDict['ConUnext'] = {'in_chans': in_channels, 'num_classes': n_classes}
 
     # NeedTrain = False
     NeedTrain = True
     SaveTrainPred = True
-    data_path = r'D:\Caiyimin\Dataset\Brats2021'
+    data_path = r'D:\Caiyimin\Dataset\Brats2018'
+    TrainDataDir = os.path.join(data_path, 'Train')
     ValidSegDir = os.path.join(data_path, 'ValidSeg', model_name)
-    PredDataDir = os.path.join(data_path, 'Brats2021Pred')
-    PredSegDir = os.path.join(data_path, 'PredSeg', model_name)
+
+    # PredDataDir = os.path.join(data_path, 'Pred')
+    # PredSegDir = os.path.join(data_path, 'PredSeg', model_name)
 
 
 class ObserveShape(transforms.MapTransform):
@@ -192,7 +249,7 @@ class Brats2021DataSet(pl.LightningDataModule):
         super(Brats2021DataSet, self).__init__()
         self.cfg = cfg
         self.data_path = cfg.data_path
-        self.train_path = os.path.join(cfg.data_path, 'Brats2021Train')
+        self.train_path = os.path.join(cfg.data_path, 'Train')
 
         self.train_dict = []
         self.val_dict = []
@@ -203,8 +260,9 @@ class Brats2021DataSet(pl.LightningDataModule):
         self.train_process = None
         self.val_process = None
 
-        self.pred_dir = cfg.PredDataDir
-        self.predSaveDir = cfg.PredSegDir
+        # self.pred_dir = cfg.PredDataDir
+        # self.predSaveDir = cfg.PredSegDir
+
         self.pred_files = []
         self.pred_set = None
         self.test_transforms = None
@@ -215,7 +273,7 @@ class Brats2021DataSet(pl.LightningDataModule):
             info = {'image': x, 'label': y}
             self.train_dict.append(info)
 
-        self.init_predFiles()
+        # self.init_predFiles()
 
         self.get_preprocess()
 
@@ -225,7 +283,7 @@ class Brats2021DataSet(pl.LightningDataModule):
 
         self.train_set = Dataset(self.train_dict, transform=self.train_process)
         self.val_set = Dataset(self.val_dict, transform=self.val_process)
-        self.pred_set = Dataset(self.pred_files, self.test_transforms)
+        # self.pred_set = Dataset(self.pred_files, self.test_transforms)
 
     def train_dataloader(self):
         cfg = self.cfg
@@ -235,10 +293,10 @@ class Brats2021DataSet(pl.LightningDataModule):
         cfg = self.cfg
         return DataLoader(self.val_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=False)
 
-    def predict_dataloader(self):
-        cfg = self.cfg
-        return DataLoader(self.pred_set, batch_size=cfg.BatchSize,
-                          num_workers=cfg.NumWorkers, shuffle=True)
+    # def predict_dataloader(self):
+    #     cfg = self.cfg
+    #     return DataLoader(self.pred_set, batch_size=cfg.BatchSize,
+    #                       num_workers=cfg.NumWorkers, shuffle=False)
 
     def get_preprocess(self):
         cfg = self.cfg
@@ -250,10 +308,10 @@ class Brats2021DataSet(pl.LightningDataModule):
                 ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
 
                 Orientationd(keys=["image", "label"], axcodes="RAS"),
-                Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0),
+                Spacingd(keys=["image", "label"], pixdim=cfg.spacings,
                          mode=("bilinear", "nearest"), ),
 
-                # RandSpatialCropd(keys=["image", "label"], roi_size=cfg.FinalShape, random_size=False),
+                RandSpatialCropd(keys=["image", "label"], roi_size=cfg.RoiSize, random_size=False),
                 # SpatialPadd(keys=['image', 'label'], spatial_size=cfg.FinalShape),
 
                 RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
@@ -274,28 +332,27 @@ class Brats2021DataSet(pl.LightningDataModule):
                 LoadImaged(keys=["image", "label"]),
                 EnsureChannelFirstd(keys="image"),
                 ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
+                Orientationd(keys=["image", "label"], axcodes="RAS"),
                 Spacingd(
-                    keys=["image", "label"],
-                    pixdim=(1.0, 1.0, 1.0),
+                    keys=["image", "label"], pixdim=cfg.spacings,
                     mode=("bilinear", "nearest"),
                 ),
-                Orientationd(keys=["image", "label"], axcodes="RAS"),
                 NormalizeIntensityd(keys="image", nonzero=True,
                                     channel_wise=True),
                 EnsureTyped(keys=["image", "label"]),
             ]
         )
-        self.test_transforms = Compose([
-            LoadImaged(keys='image'),
-            EnsureChannelFirstd(keys='image'),
-            Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            Orientationd(keys='image', axcodes="RAS"),
-            NormalizeIntensityd(keys='image', nonzero=True, channel_wise=True),
-            EnsureTyped(keys='image'),
-        ])
+        # self.test_transforms = Compose([
+        #     LoadImaged(keys='image'),
+        #     EnsureChannelFirstd(keys='image'),
+        #     Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
+        #     Orientationd(keys='image', axcodes="RAS"),
+        #     NormalizeIntensityd(keys='image', nonzero=True, channel_wise=True),
+        #     EnsureTyped(keys='image'),
+        # ])
 
     def initTrainVal(self):
-        FP = os.path.join(Config.data_path, 'Brats2021Train')
+        FP = self.cfg.TrainDataDir
         train_x, train_y = [], []
         for _, dirs, _ in os.walk(FP):
             for dr in dirs:
@@ -343,18 +400,23 @@ class Brats2021Model(pl.LightningModule):
         model = cfg.ModelDict[cfg.model_name]
         kwargs = cfg.ArgsDict[cfg.model_name]
         self.net = model(**kwargs)
-        if cfg.model_name != 'SwinUnet3D':  # Monai中的模型缺乏参数初始化，不加参数初始化容易导致某些通道的dice系数爆零
+        # 这两个模型已经在内部自己进行了参数初始化
+        if cfg.model_name not in ('SwinUnet3D', 'SwinBTS'):  # Monai中的模型缺乏参数初始化，不加参数初始化容易导致某些通道的dice系数爆零
             ModelParamInit(self.net)
 
         self.loss_func = DiceLoss(smooth_nr=0, smooth_dr=1e-5,
                                   squared_pred=True, to_onehot_y=False,
                                   sigmoid=True, )
-        self.dice_metric = DiceMetric(include_background=True,
-                                      reduction="mean_batch")
+        self.metrics = [
+            DiceMetric(include_background=True,
+                       reduction="mean_batch"),
+            DiceMetric(include_background=True,
+                       reduction="mean_batch")
+        ]
         # self.HD_metric = HausdorffDistanceMetric(include_background=True, reduction='mean_batch')
         self.post_trans = Compose([EnsureType(),
                                    Activations(sigmoid=True),
-                                   AsDiscrete(threshold_values=True)])
+                                   AsDiscrete(threshold=0.5)])
         self.label_reverse = ReverseBratsLabel()
 
     def configure_optimizers(self):
@@ -370,12 +432,13 @@ class Brats2021Model(pl.LightningModule):
         cfg = self.cfg
         x = batch['image']
         y = batch['label'].float()
-        y_hat = sliding_window_inference(x, roi_size=cfg.roi_size,
-                                         overlap=cfg.overlap,
-                                         sw_batch_size=1,
-                                         predictor=self.net)
+        # y_hat = sliding_window_inference(x, roi_size=cfg.roi_size,
+        #                                  overlap=cfg.overlap,
+        #                                  sw_batch_size=1,
+        #                                  predictor=self.net)
+        y_hat = self.net(x)
 
-        loss, dices = self.shared_step(y_hat, y)
+        loss, dices = self.shared_step(y_hat, y, 0)
         tc_dice, wt_dice, et_dice = dices[0], dices[1], dices[2]
 
         self.log('train_tc_dice', tc_dice, prog_bar=True)
@@ -391,11 +454,11 @@ class Brats2021Model(pl.LightningModule):
             cfg = self.cfg
             x = batch['image']
             y = batch['label'].float()
+
             # 使用滑动窗口进行推理
             y_hat = sliding_window_inference(x, roi_size=cfg.roi_size, overlap=cfg.overlap,
                                              sw_batch_size=1, predictor=self.net)
-
-            loss, dices = self.shared_step(y_hat, y)
+            loss, dices = self.shared_step(y_hat, y, 1)
             tc_dice, wt_dice, et_dice = dices[0], dices[1], dices[2]
 
             self.log('valid_tc_dice', tc_dice, prog_bar=True)
@@ -403,13 +466,14 @@ class Brats2021Model(pl.LightningModule):
             self.log('valid_wt_dice', wt_dice, prog_bar=True)
 
             self.log('valid_loss', loss, prog_bar=True)
-            if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-                meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+            if self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
+                meta_dict = batch['label_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
                 for k, v in meta_dict.items():
                     if isinstance(v, torch.Tensor):
                         meta_dict[k] = v.detach().cpu()
 
                 y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+                # y_hat = y_hat.as_tensor()
                 y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
                 y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
                 y_hat = torch.stack(y_hat)  # B,H,W,D
@@ -423,24 +487,26 @@ class Brats2021Model(pl.LightningModule):
             return {'valid_loss': loss, 'valid_dice': dices}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
-        with torch.no_grad():
-            cfg = self.cfg
-            img = batch['image']
-            preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
-                                             sw_batch_size=1, predictor=self.net)
-            meta_dict = batch['image_meta_dict']
-            for k, v in meta_dict.items():
-                if isinstance(v, torch.Tensor):
-                    meta_dict[k] = v.detach().cpu()
-
-            preds = preds.detach().cpu()
-            preds = [self.post_trans(i) for i in decollate_batch(preds)]
-            preds = [self.label_reverse(i) for i in preds]
-            preds = torch.stack(preds)  # B,H,W,D
-            preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-
-            saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
-            saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
+        # with torch.no_grad():
+        #     cfg = self.cfg
+        #     img = batch['image']
+        #     preds = sliding_window_inference(img, roi_size=cfg.RoiSize, overlap=cfg.overlap,
+        #                                      sw_batch_size=1, predictor=self.net)
+        #     meta_dict = batch['label_meta_dict']
+        #     for k, v in meta_dict.items():
+        #         if isinstance(v, torch.Tensor):
+        #             meta_dict[k] = v.detach().cpu()
+        #
+        #     preds = preds.detach().cpu()
+        #     preds = preds.as_tensor()
+        #     preds = [self.post_trans(i) for i in decollate_batch(preds)]
+        #     preds = [self.label_reverse(i) for i in preds]
+        #     preds = torch.stack(preds)  # B,H,W,D
+        #     preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+        #
+        #     saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
+        #     saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
+        pass
 
     def training_epoch_end(self, outputs):
         losses, mean_dice = self.shared_epoch_end(outputs, 'loss')
@@ -455,7 +521,7 @@ class Brats2021Model(pl.LightningModule):
             self.log('et_train_mean_dice', et_mean_dice, prog_bar=True)
 
     def validation_epoch_end(self, outputs):
-        losses, mean_dice = self.shared_epoch_end(outputs, 'valid_loss')
+        losses, mean_dice = self.shared_epoch_end(outputs, 'valid_loss', 1)
         if len(losses) > 0:
             mean_loss = torch.mean(losses)
 
@@ -467,7 +533,7 @@ class Brats2021Model(pl.LightningModule):
             self.log('wt_valid_mean_dice', wt_mean_dice, prog_bar=True)
             self.log('et_valid_mean_dice', et_mean_dice, prog_bar=True)
 
-    def shared_epoch_end(self, outputs, loss_key):
+    def shared_epoch_end(self, outputs, loss_key, stage: int = 0):  # 0为训练阶段，1为验证阶段
         losses = []
         for output in outputs:
             # loss = output['loss'].detach().cpu().numpy()
@@ -477,33 +543,35 @@ class Brats2021Model(pl.LightningModule):
 
         losses = torch.stack(losses)
 
-        mean_dice = self.dice_metric.aggregate()
-        self.dice_metric.reset()
+        # if stage == 0:
+        #     mean_dice = self.train_metric.aggregate()
+        #       self.train_metric.reset()
+        # else:
+        #     mean_dice = self.val_metric.aggregate()
+        #     self.val_metric.reset()
+        mean_dice = self.metrics[stage].aggregate()
+
+        self.metrics[stage].reset()
 
         return losses, mean_dice
 
-    def shared_step(self, y_hat, y):
+    def shared_step(self, y_hat, y, stage: int = 0):  # 0为训练阶段，1为验证阶段
         loss = self.loss_func(y_hat, y)
 
+        # y_hat = y_hat.as_tensor()
         y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-        dice = self.dice_metric(y_pred=y_hat, y=y)
+
+        # if stage == 0:
+        #     dice = self.train_metric(y_pred=y_hat, y=y)
+        # else:
+        #     dice = self.val_metric(y_pred=y_hat, y=y)
+        dice = self.metrics[stage](y_pred=y_hat, y=y)
+
         loss = torch.nan_to_num(loss)
         dice = torch.nan_to_num(dice)
         dice = torch.mean(dice, dim=0)
 
         return loss, dice
-
-    def save_pred_label(self, y_hats, names):
-        cfg = self.cfg
-        y_hats = [self.post_trans(i) for i in decollate_batch(y_hats)]
-        save_dir = os.path.join(f'./PredLabel/{cfg.model_name}')
-        save_dir = os.path.abspath(save_dir)
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        for y_hat, save_name in zip(y_hats, names):
-            save_name = save_name.split('\\')[-1]
-            save_name = os.path.join(save_dir, save_name)
-            save_pred(y_hat, save_name)
 
 
 def ModelParamInit(model):
@@ -535,7 +603,9 @@ def main():
                                   save_top_k=3, monitor='valid_mean_loss', verbose=True,
                                   filename='{epoch}-{valid_loss:.2f}-{et_valid_mean_dice:.2f}')
     trainer = pl.Trainer(
-        progress_bar_refresh_rate=10,
+        accelerator='gpu',
+        devices=[2],
+        reload_dataloaders_every_n_epochs=1000,
         max_epochs=cfg.max_epoch,
         min_epochs=cfg.min_epoch,
         gpus=1,
@@ -562,10 +632,12 @@ def main():
         model.eval()
         model.freeze()
 
-    predict_data = Brats2021DataSet()
-    trainer.predict(model, datamodule=data)
+    # predict_data = Brats2021DataSet()
+    # trainer.predict(model, datamodule=predict_data)
 
 
 if __name__ == '__main__':
     setseed()
+    torch.multiprocessing.set_sharing_strategy('file_system')
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
     main()

@@ -1,7 +1,7 @@
 import os
+import random
 
 import torch
-from monai.metrics import DiceMetric
 from torch import nn, functional as F, optim
 import monai
 import pytorch_lightning as pl
@@ -10,7 +10,6 @@ from monai import transforms
 from monai.transforms import Compose
 from monai.transforms import LoadImaged, LoadImage
 from monai.data import Dataset, SmartCacheDataset
-from monai.inferers import sliding_window_inference
 from torch.utils.data import DataLoader, random_split
 from glob import glob
 import numpy as np
@@ -19,33 +18,67 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
 from torch.utils.data import random_split
 from SwinUnet_3D import swinUnet_t_3D
-from torchmetrics.functional import dice_score
+from monai.losses import DiceLoss, DiceFocalLoss, DiceCELoss, FocalLoss
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.inferers import sliding_window_inference
+from monai.utils import set_determinism
+from monai.data import decollate_batch, list_data_collate
+from monai.networks.nets import UNETR, UNet, VNet
+from timm.models.layers import trunc_normal_
+from monai.data import NiftiSaver
+from monai.transforms import (
+    Activations,
+    Activationsd,
+    AsDiscrete,
+    AsDiscreted,
+    Compose,
+    Invertd,
+    LoadImaged,
+    MapTransform,
+    NormalizeIntensityd,
+    Orientationd,
+    RandFlipd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    RandSpatialCropd,
+    Spacingd,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    EnsureType,
+    SpatialPadd,
+    ScaleIntensityRangePercentilesd,
+    ScaleIntensityRanged,
+    CropForegroundd,
+    RandCropByPosNegLabeld,
+    RandRotate90d,
+    RandCropByLabelClassesd
+)
 
 
 class Config(object):
     data_path = r'D:\Caiyimin\Dataset\LITSChallenge'
+    Seed = 42
     # 肝脾CT检查应适当变窄窗宽以便更好发现病灶，窗宽为100 Hu~200 Hu,窗位为30 Hu~45 Hu,
-    window_center = min(30, 40)  # 针对CT而言的窗位和窗宽
-    window_level = max(100, 200)
-    HUMAX = 180
-    HUMIN = -70
+    HuMax = 180
+    HuMin = -70
     LowPercent = 0.5
     HighPercent = 99.5
 
-    # 数据集正向区域的shape中位数为[283,248,132]，但是FinaleShape设置为[256,256,128]加上半精度， batch=1,24G显存都不够
     in_channels = 1
-    FinalShape = [192, 192, 160]
-    window_size = [6, 6, 5]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    num_samples = 4
+    FinalShape = [96, 96, 64]
+    window_size = [it // 32 for it in FinalShape]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     slid_window_overlap = 0.5
 
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
     NumWorkers = 0
-    n_classes = 2  # 分割总的类别数:背景+肝脏+肿瘤
+    n_classes = 3  # 分割总的类别数:背景+肝脏+肿瘤
     lr = 3e-4  # 学习率
-    PixDim = (2.0, 2.0, 3.0)
+    PixDim = (2.0, 2.0, 1.0)
 
-    back_bone_name = 'SwinUnet3D'
+    # back_bone_name = 'SwinUnet3D'
+    back_bone_name = 'Unet3D'
 
 
 class ObserveShape(transforms.MapTransform):
@@ -57,23 +90,6 @@ class ObserveShape(transforms.MapTransform):
         for key in self.keys:
             print(f'\n{key}的形状为：{d[key].shape}')
             # 输入是(X,Y,Z)
-        return d
-
-
-class ConvertLabel(transforms.MapTransform):
-
-    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False):
-        super().__init__(keys, allow_missing_keys)
-
-    def __call__(self, data):
-        d = dict(data)
-        for key in self.key_iterator(d):
-            img = d[key]
-            res = []
-            res.append(np.logical_or(img == 1, img == 2))  # 将标签1和2合并成liver通道
-            res.append(img == 2)  # 将标签2合并成肿瘤通道
-            res = np.stack(res, axis=0)
-            d[key] = res
         return d
 
 
@@ -116,7 +132,9 @@ class LitsDataSet(pl.LightningDataModule):
 
     def train_dataloader(self):
         cfg = self.cfg
-        return DataLoader(self.train_set, batch_size=cfg.BatchSize, num_workers=cfg.NumWorkers, shuffle=True)
+        return DataLoader(self.train_set, batch_size=cfg.BatchSize,
+                          num_workers=cfg.NumWorkers, shuffle=True,
+                          collate_fn=list_data_collate)
 
     def val_dataloader(self):
         cfg = self.cfg
@@ -129,40 +147,52 @@ class LitsDataSet(pl.LightningDataModule):
     def get_preprocess(self):
         self.train_process = Compose([
             LoadImaged(keys=['image', 'label']),
-            transforms.EnsureChannelFirstd(keys=['image']),
-            ConvertLabel(keys='label'),
+            EnsureChannelFirstd(keys=['image', 'label']),
 
-            transforms.Spacingd(keys=['image', 'label'], pixdim=self.cfg.PixDim,
-                                mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'label'], axcodes='RAS'),
+            Orientationd(keys=['image', 'label'], axcodes='RAS'),
+            Spacingd(keys=['image', 'label'], pixdim=self.cfg.PixDim,
+                     mode=('bilinear', 'nearest')),
 
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.LowPercent,
-                                                       upper=cfg.HighPercent, relative=True,
-                                                       b_min=0.0, b_max=1.0, clip=True),
-            transforms.ResizeWithPadOrCropd(keys=['image', 'label'], spatial_size=cfg.FinalShape),
+            # ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.LowPercent,
+            #                                 upper=cfg.HighPercent, relative=True,
+            #                                 b_min=0.0, b_max=1.0, clip=True),
 
-            transforms.RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
-            transforms.RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=1),
-            transforms.RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=2),
+            ScaleIntensityRanged(keys='image', a_min=cfg.HuMin, a_max=cfg.HuMax,
+                                 b_min=0.0, b_max=1.0, clip=True),
 
-            transforms.ToTensord(keys=['image', 'label']),
+            # CropForegroundd(keys=["image", "label"], source_key='image'),
+            # RandCropByPosNegLabeld(keys=["image", "label"], label_key="label",
+            #                        spatial_size=cfg.FinalShape, pos=1, neg=1,
+            #                        num_samples=cfg.num_samples, image_key='image', ),
+
+            RandCropByLabelClassesd(keys=['image', 'label'], label_key='label',
+                                    spatial_size=cfg.FinalShape, ratios=(1, 1, 1),
+                                    num_classes=cfg.n_classes, num_samples=cfg.num_samples,
+                                    image_key='image'
+                                    ),
+            RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=2),
+            RandRotate90d(keys=['image', 'label'], prob=0.1, max_k=3),
+
+            EnsureTyped(keys=['image', 'label']),
 
         ])
 
         self.val_process = Compose([
             LoadImaged(keys=['image', 'label']),
-            transforms.EnsureChannelFirstd(keys=['image']),
-            ConvertLabel(keys='label'),
+            EnsureChannelFirstd(keys=['image', 'label']),
 
-            transforms.Spacingd(keys=['image', 'label'], pixdim=self.cfg.PixDim, mode=['bilinear', 'nearest']),
-            transforms.Orientationd(keys=['image', 'label'], axcodes='RAS'),
+            Orientationd(keys=['image', 'label'], axcodes='RAS'),
+            Spacingd(keys=['image', 'label'], pixdim=self.cfg.PixDim,
+                     mode=('bilinear', 'nearest')),
 
-            transforms.ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.LowPercent,
-                                                       upper=cfg.HighPercent, relative=True,
-                                                       b_min=0.0, b_max=1.0, clip=True),
+            ScaleIntensityRangePercentilesd(keys=['image'], lower=cfg.LowPercent,
+                                            upper=cfg.HighPercent, relative=True,
+                                            b_min=0.0, b_max=1.0, clip=True),
             # 验证集没有做空间尺寸的变换，是因为在模型的valid_step中，我们使用了滑动窗口进行推理,即函数sliding_window_inference
 
-            transforms.ToTensord(keys=['image', 'label']),
+            EnsureTyped(keys=['image', 'label']),
         ])
 
     def get_init(self):
@@ -184,7 +214,9 @@ class LitsDataSet(pl.LightningDataModule):
             remain = num - train_num - test_num - val_num
             val_num += remain
 
-        self.train_dict, self.val_dict, self.test_dict = random_split(self.train_dict, [train_num, val_num, test_num])
+        self.train_dict, self.val_dict, self.test_dict = random_split(self.train_dict,
+                                                                      [train_num, val_num, test_num],
+                                                                      generator=torch.Generator().manual_seed(cfg.Seed))
 
 
 class LITSModel(pl.LightningModule):
@@ -198,11 +230,18 @@ class LITSModel(pl.LightningModule):
             from monai.networks.nets import UNETR, UNet
             self.net = UNETR(in_channels=cfg.in_channels, out_channels=cfg.n_classes, img_size=cfg.FinalShape)
 
-        self.loss_func = monai.losses.DiceLoss(sigmoid=True)
-        self.post_pred = Compose([transforms.AsDiscrete(threshold=0.5)])
-        self.post_label = Compose([transforms.AsDiscrete(threshold=0.5)])
+        self.loss_func = monai.losses.DiceLoss(to_onehot_y=True, softmax=True)
+        self.post_pred = Compose([
+            EnsureType(),
+            AsDiscrete(argmax=True, to_onehot=cfg.n_classes)
+        ])
+        self.post_label = Compose([
+            EnsureType(),
+            AsDiscrete(to_onehot=cfg.n_classes)
+        ])
 
-        self.metrics = DiceMetric(include_background=True, reduction="mean_batch")
+        self.metrics = DiceMetric(include_background=False, reduction="mean_batch",
+                                  get_not_nans=False)
         # self.metrics = dice_score
 
     def forward(self, x):
@@ -296,8 +335,7 @@ class LITSModel(pl.LightningModule):
         dice_loss = self.loss_func(y_hat, y)
 
         from monai.data import decollate_batch
-        y_hat = decollate_batch(y_hat)
-        y_hat = [self.post_pred(i) for i in y_hat]
+        y_hat = [self.post_pred(i) for i in decollate_batch(y_hat)]
         y = [self.post_label(i) for i in decollate_batch(y)]
         dice = self.metrics(y_hat, y)
         dice = torch.mean(dice, dim=0)

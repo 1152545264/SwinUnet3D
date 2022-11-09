@@ -6,4 +6,5 @@
 *.png
 venv_w
 MedicalZooPytorch
-ConUnext3D.py
+LKAUnet3D.py
+/__pycache__/

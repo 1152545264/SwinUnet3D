@@ -82,11 +82,11 @@ class Config(object):
 
     lr = 3e-4  # 学习率
 
-    MinEpoch = 1000
+    MinEpoch = 1500
     MaxEpoch = 5000
 
-    model_name = 'SwinUnet3D'
-    # model_name = 'Unet3D'
+    # model_name = 'SwinUnet3D'
+    model_name = 'Unet3D'
     # model_name = 'VNet'
     # model_name = 'UNetR'
 
@@ -170,9 +170,9 @@ class BTCVDataset(pl.LightningDataModule):
             LoadImaged(keys=['image', 'label']),
             EnsureChannelFirstd(keys=['image', 'label']),
 
+            Orientationd(keys=['image', 'label'], axcodes='RAS'),
             Spacingd(keys=['image', 'label'], pixdim=cfg.ResamplePixDim,
                      mode=('bilinear', 'nearest')),
-            Orientationd(keys=['image', 'label'], axcodes='RAS'),
 
             ScaleIntensityRanged(keys='image', a_min=cfg.HuMin, a_max=cfg.HuMax,
                                  b_min=0.0, b_max=1.0, clip=True),
@@ -201,9 +201,9 @@ class BTCVDataset(pl.LightningDataModule):
             LoadImaged(keys=['image', 'label']),
             EnsureChannelFirstd(keys=['image', 'label']),
 
+            Orientationd(keys=['image', 'label'], axcodes='RAS'),
             Spacingd(keys=['image', 'label'], pixdim=cfg.ResamplePixDim,
                      mode=('bilinear', 'nearest')),
-            Orientationd(keys=['image', 'label'], axcodes='RAS'),
 
             ScaleIntensityRanged(keys='image', a_min=cfg.HuMin, a_max=cfg.HuMax,
                                  b_min=0.0, b_max=1.0, clip=True),
