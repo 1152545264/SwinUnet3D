@@ -2,9 +2,7 @@
 **/logs/
 **/PredLabel/
 */trained_models/
+__pycache__
 *.ckpt
 *.png
 venv_w
-MedicalZooPytorch
-LKAUnet3D.py
-/__pycache__/
