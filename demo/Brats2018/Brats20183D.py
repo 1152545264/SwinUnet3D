@@ -92,9 +92,7 @@ class Config(object):
     spacings = [1.0, 1.0, 1.0]
     # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
     # RoiSize = [256 // spacings[0], 256 // spacings[1], 160 // spacings[2]]
-    # RoiSize = [int(it) for it in RoiSize]
-
-    RoiSize = [128, 128, 128]
+    RoiSize = [128, 128, 128]  # SwinBTS和SwinUnetR需要hwd三个方向上的大小一致，其余的模型不需要
     window_size = [it // 32 for it in RoiSize]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
     in_channels = 4
     '''
