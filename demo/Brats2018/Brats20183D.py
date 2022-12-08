@@ -54,11 +54,6 @@ from SwinUnet_3D import swinUnet_t_3D
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
 
 
-def setseed(seed: int = 42):
-    pl.seed_everything(seed)
-    set_determinism(seed)
-
-
 def get_nnunet_k_s(final_shape, spacings):  #
     sizes, spacings = final_shape, spacings
     input_size = sizes
@@ -90,7 +85,6 @@ def get_nnunet_k_s(final_shape, spacings):  #
 class Config(object):
     seed = 42  # 设置随机数种子
     spacings = [1.0, 1.0, 1.0]
-    # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
     # RoiSize = [256 // spacings[0], 256 // spacings[1], 160 // spacings[2]]
     RoiSize = [128, 128, 128]  # SwinBTS和SwinUnetR需要hwd三个方向上的大小一致，其余的模型不需要
     window_size = [it // 32 for it in RoiSize]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
@@ -132,9 +126,7 @@ class Config(object):
     # model_name = 'TransBTS'
 
     model_name = 'SwinUNETR'
-    # if model_name == 'TransBTS':
-    #     roi_size = RoiSize = [128, 128, 128]
-    #     overlap = 0.125
+    model_name = 'AttentionUnet'
 
     ModelDict = {}
     ArgsDict = {}
@@ -156,12 +148,12 @@ class Config(object):
 
     ModelDict['TransBTS'] = BTS
     ArgsDict['TransBTS'] = {'img_dim': 128, 'patch_dim': 8, 'num_channels': in_channels,
-                            'num_classes': n_classes,
-                            'embedding_dim': 512,
-                            'num_heads': 8,
-                            'num_layers': 4,
-                            'hidden_dim': 4096,
-                            }
+                            'num_classes': n_classes, 'embedding_dim': 512,
+                            'num_heads': 8, 'num_layers': 4, 'hidden_dim': 4096, }
+
+    ModelDict['AttentionUnet'] = AttentionUnet
+    ArgsDict['AttentionUnet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes,
+                                 'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
@@ -590,6 +582,11 @@ def ModelParamInit(model):
                 nn.init.constant_(m.bias, 0)
 
 
+def setseed(seed: int = 42):
+    pl.seed_everything(seed)
+    set_determinism(seed)
+
+
 def main():
     data = Brats2021DataSet()
     model = Brats2021Model()
@@ -639,7 +636,7 @@ def main():
 
 
 if __name__ == '__main__':
-    setseed()
+    setseed(seed=Config.seed)
     torch.multiprocessing.set_sharing_strategy('file_system')
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
     main()

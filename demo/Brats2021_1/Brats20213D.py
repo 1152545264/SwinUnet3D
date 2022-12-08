@@ -21,7 +21,7 @@ from monai.inferers import sliding_window_inference
 from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
-from monai.networks.nets import UNETR, UNet, VNet, DynUNet, SegResNet, SwinUNETR
+from monai.networks.nets import UNETR, UNet, VNet, DynUNet, SegResNet, SwinUNETR, AttentionUnet
 from monai.networks.nets import TopologySearch
 
 from monai.transforms import (
@@ -52,11 +52,6 @@ from OthersModel.Swin_BTS.SwinUnet import swinunetr
 
 from SwinUnet_3D import swinUnet_t_3D
 from SwinUnet_3D.SwinUnet3D_pure_Transformer import SwinUnet3D as SwinPureUnet3D
-
-
-def setseed(seed: int = 42):
-    pl.seed_everything(seed)
-    set_determinism(seed)
 
 
 def get_nnunet_k_s(final_shape, spacings):  #
@@ -90,7 +85,6 @@ def get_nnunet_k_s(final_shape, spacings):  #
 class Config(object):
     seed = 42  # 设置随机数种子
     spacings = [1.0, 1.0, 1.0]
-    # 脑组织窗宽设定为80Hu~100Hu, 窗位为30Hu~40Hu,
     # RoiSize = [256 // spacings[0], 256 // spacings[1], 160 // spacings[2]]
     RoiSize = [128, 128, 128]  # SwinBTS和SwinUnetR需要hwd三个方向上的大小一致，其余的模型不需要
     window_size = [it // 32 for it in RoiSize]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
@@ -127,6 +121,7 @@ class Config(object):
     # model_name = 'UNetR'
     model_name = 'SwinUNETR'
     # model_name = 'SwinBTS'
+    # model_name = 'AttentionUnet'
 
     ModelDict = {}
     ArgsDict = {}
@@ -145,6 +140,10 @@ class Config(object):
 
     ModelDict['SwinBTS'] = swinunetr
     ArgsDict['SwinBTS'] = {'image_size': 128, 'patch_size': 4, 'in_chans': in_channels, 'num_lables': n_classes}
+
+    ModelDict['AttentionUnet'] = AttentionUnet
+    ArgsDict['AttentionUnet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes,
+                                 'channels': (32, 64, 128, 256, 512), 'strides': (2, 2, 2, 2)}
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
@@ -563,6 +562,11 @@ def ModelParamInit(model):
                 nn.init.constant_(m.weight, 1.0)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+
+
+def setseed(seed: int = Config.seed):
+    pl.seed_everything(seed)
+    set_determinism(seed)
 
 
 def main():

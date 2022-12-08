@@ -21,6 +21,8 @@ from einops import rearrange
 """
 该代码主要用于Bottleneck模块的修改
 """
+
+
 class swinunetr(nn.Module):
     def __init__(self, image_size=128, patch_size=4, in_chans=4, num_lables=3, embed_dim=96,
                  depths=(2, 2, 2, 2), num_heads=(3, 6, 12, 24),
@@ -36,7 +38,7 @@ class swinunetr(nn.Module):
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
-        self.num_features = int(embed_dim * 2 ** (self.num_layers-1))
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.num_features_up = int(embed_dim * 2)
         self.mlp_ratio = mlp_ratio
         self.final_upsample = final_upsample
@@ -76,18 +78,18 @@ class swinunetr(nn.Module):
                     use_checkpoint=use_checkpoint)
             else:
                 layer = Basiclayer_Bottleneck(dim=int(embed_dim * 2 ** i_layer),
-                    depth=depths[i_layer],
-                    num_heads=num_heads[i_layer],
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    qk_scale=qk_scale,
-                    drop=drop_rate,
-                    attn_drop=attn_drop_rate,
-                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                    drop_path_rate=drop_path_rate,
-                    norm_layer=norm_layer,
-                    downsample=PatchMerging if i_layer < self.num_layers - 1 else None,
-                    use_checkpoint=use_checkpoint)
+                                              depth=depths[i_layer],
+                                              num_heads=num_heads[i_layer],
+                                              mlp_ratio=mlp_ratio,
+                                              qkv_bias=qkv_bias,
+                                              qk_scale=qk_scale,
+                                              drop=drop_rate,
+                                              attn_drop=attn_drop_rate,
+                                              drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                                              drop_path_rate=drop_path_rate,
+                                              norm_layer=norm_layer,
+                                              downsample=PatchMerging if i_layer < self.num_layers - 1 else None,
+                                              use_checkpoint=use_checkpoint)
             self.layers.append(layer)
         self.norm = norm_layer(self.num_features)
         self.norm_up = norm_layer(self.embed_dim)
@@ -105,7 +107,8 @@ class swinunetr(nn.Module):
             #     dim=int(embed_dim * 2 ** (self.num_layers - 1 - i_layer))
             # )
             if i_layer == 0:
-                layer_up = PatchExpand_Up(dim=int(embed_dim * 2 ** (self.num_layers - 1 - i_layer)), norm_layer=norm_layer)
+                layer_up = PatchExpand_Up(dim=int(embed_dim * 2 ** (self.num_layers - 1 - i_layer)),
+                                          norm_layer=norm_layer)
             else:
                 layer_up = Basiclayer_up(
                     dim=int(embed_dim * 2 ** (self.num_layers - 1 - i_layer)),
@@ -126,15 +129,17 @@ class swinunetr(nn.Module):
             # self.layers_Res.append(layer_Res)
 
         # self.up = FinalPatchExpand_X4(embed_dim, patch_size=patch_size)
-        self.up = FinalPatchExpand_X41(input_resolution=(image_size // patch_size, image_size // patch_size, image_size // patch_size),
-                        dim_scale=4, dim=embed_dim)
+        self.up = FinalPatchExpand_X41(
+            input_resolution=(image_size // patch_size, image_size // patch_size, image_size // patch_size),
+            dim_scale=4, dim=embed_dim)
         # self.up = FinalPatchExpand_X41(input_resolution=(64, 64, 64),
         #                 dim_scale=2, dim=embed_dim)
 
         self.output = nn.Conv3d(in_channels=embed_dim, out_channels=num_lables, kernel_size=1, bias=False)
+
     # Encoder and Bottleneck
     def forward_features(self, x):
-        x =self.patch_embed3D(x)   # B C D H W
+        x = self.patch_embed3D(x)  # B C D H W
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
@@ -156,7 +161,7 @@ class swinunetr(nn.Module):
                 x = layer_up(x)
             else:
 
-                x = torch.cat((x, x_downsample[3-i]), 4)  # B D H W C
+                x = torch.cat((x, x_downsample[3 - i]), 4)  # B D H W C
                 # x = torch.cat((x, x_downsample[3-i]), 4) # B D H W C
                 B, D, H, W, _ = x.shape
                 x = x.flatten(1, 3)
@@ -177,11 +182,10 @@ class swinunetr(nn.Module):
         x = self.output(x)
         return x
 
-
     def forward(self, x):
         # or_x = x
         # print(x.shape)
-        x, x_downsample = self.forward_features(x)     # x, x_downsample shape: B D H W C
+        x, x_downsample = self.forward_features(x)  # x, x_downsample shape: B D H W C
         # print(len(x_downsample))
 
         x = self.forward_up_features(x, x_downsample)
@@ -337,7 +341,6 @@ class swinunetr(nn.Module):
             print("none pretrain")
 
 
-
 class PatchMerging1(nn.Module):
     """ Patch Merging Layer
 
@@ -381,8 +384,6 @@ class PatchMerging1(nn.Module):
         return x
 
 
-
-
 class PatchMerging(nn.Module):
     def __init__(self, dim, norm_layer=nn.LayerNorm):
         super(PatchMerging, self).__init__()
@@ -399,14 +400,12 @@ class PatchMerging(nn.Module):
             nn.BatchNorm3d(dim),
             # nn.GroupNorm(num_groups=8, num_channels=dim)
         )
-        self.conv = nn.Conv3d(dim, 2*dim, kernel_size=2, stride=2)
+        self.conv = nn.Conv3d(dim, 2 * dim, kernel_size=2, stride=2)
         self.gelu = nn.GELU()
         # self.bn = nn.BatchNorm3d(2*dim)
-        self.norm = norm_layer(2*dim)
-
+        self.norm = norm_layer(2 * dim)
 
     def forward(self, x):
-
         x = rearrange(x, 'b d h w c -> b c d h w')
         x = self.conv(x + self.dwconv(x))
         # x = self.conv(x)
@@ -419,5 +418,5 @@ class PatchMerging(nn.Module):
 if __name__ == '__main__':
     a = torch.ones(1, 4, 128, 128, 128)
 
-    a= swinunetr()(a)
+    a = swinunetr()(a)
     print(a.shape)
