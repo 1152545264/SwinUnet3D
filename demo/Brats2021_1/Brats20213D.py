@@ -51,6 +51,7 @@ from timm.models.layers import trunc_normal_
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
 
 from SwinUnet_3D import swinUnet_t_3D
+from SwinUnet_3D.SwinUnet3D_pure_Transformer import SwinUnet3D as SwinPureUnet3D
 
 
 def setseed(seed: int = 42):
@@ -125,8 +126,8 @@ class Config(object):
     # model_name = 'Unet3D'
     # model_name = 'VNet'
     # model_name = 'UNetR'
-    # model_name = 'SwinUNETR'
-    model_name = 'SwinBTS'
+    model_name = 'SwinUNETR'
+    # model_name = 'SwinBTS'
 
     ModelDict = {}
     ArgsDict = {}
@@ -244,14 +245,17 @@ class Brats2021DataSet(pl.LightningDataModule):
         self.pred_files = []
         self.pred_set = None
         self.test_transforms = None
+        self.cnt = 0
 
     def prepare_data(self):
-        train_x, train_y = self.initTrainVal()
-        for x, y in zip(train_x, train_y):
-            info = {'image': x, 'label': y}
-            self.train_dict.append(info)
+        if self.cnt == 0:  # 避免训练过程中因为重新加载数据导致报错
+            train_x, train_y = self.initTrainVal()
+            for x, y in zip(train_x, train_y):
+                info = {'image': x, 'label': y}
+                self.train_dict.append(info)
 
-        self.init_predFiles()
+            self.init_predFiles()
+            self.cnt += 1
 
         self.get_preprocess()
 

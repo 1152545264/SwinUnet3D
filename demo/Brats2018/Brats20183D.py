@@ -126,14 +126,14 @@ class Config(object):
     overlap = 0.125
 
     # model_name = 'Unet3D'
-    model_name = 'VNet'
+    # model_name = 'VNet'
     # model_name = 'SwinUnet3D'
 
     # model_name = 'UNetR'
     # model_name = 'SwinBTS'
     # model_name = 'TransBTS'
 
-    # model_name = 'SwinUNETR'
+    model_name = 'SwinUNETR'
     # if model_name == 'TransBTS':
     #     roi_size = RoiSize = [128, 128, 128]
     #     overlap = 0.125
@@ -267,13 +267,17 @@ class Brats2021DataSet(pl.LightningDataModule):
         self.pred_set = None
         self.test_transforms = None
 
-    def prepare_data(self):
-        train_x, train_y = self.initTrainVal()
-        for x, y in zip(train_x, train_y):
-            info = {'image': x, 'label': y}
-            self.train_dict.append(info)
+        self.cnt = 0
 
-        # self.init_predFiles()
+    def prepare_data(self):
+        if self.cnt == 0:
+            train_x, train_y = self.initTrainVal()
+            for x, y in zip(train_x, train_y):
+                info = {'image': x, 'label': y}
+                self.train_dict.append(info)
+
+            # self.init_predFiles()
+            self.cnt += 1
 
         self.get_preprocess()
 
