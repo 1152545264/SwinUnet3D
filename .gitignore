@@ -4,5 +4,4 @@
 */trained_models/
 __pycache__
 *.ckpt
-*.png
 venv_w
