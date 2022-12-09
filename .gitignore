@@ -2,6 +2,6 @@
 **/logs/
 **/PredLabel/
 */trained_models/
-**/__pycache__/
+*/__pycache__/
 *.ckpt
 venv_w
