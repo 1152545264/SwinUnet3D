@@ -125,7 +125,7 @@ class Config(object):
     # model_name = 'SwinBTS'
     # model_name = 'TransBTS'
 
-    model_name = 'SwinUNETR'
+    # model_name = 'SwinUNETR'
     model_name = 'AttentionUnet'
 
     ModelDict = {}

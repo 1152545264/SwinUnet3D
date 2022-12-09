@@ -119,9 +119,9 @@ class Config(object):
     # model_name = 'Unet3D'
     # model_name = 'VNet'
     # model_name = 'UNetR'
-    model_name = 'SwinUNETR'
+    # model_name = 'SwinUNETR'
     # model_name = 'SwinBTS'
-    # model_name = 'AttentionUnet'
+    model_name = 'AttentionUnet'
 
     ModelDict = {}
     ArgsDict = {}
@@ -152,6 +152,7 @@ class Config(object):
     NeedTrain = True
     SaveTrainPred = True
     data_path = r'D:\Caiyimin\Dataset\Brats2021'
+    TrainPath = os.path.join(data_path, 'Brats2021Train')
     ValidSegDir = os.path.join(data_path, 'ValidSeg', model_name)
     PredDataDir = os.path.join(data_path, 'Brats2021Pred')
     PredSegDir = os.path.join(data_path, 'PredSeg', model_name)
@@ -227,7 +228,7 @@ class Brats2021DataSet(pl.LightningDataModule):
         super(Brats2021DataSet, self).__init__()
         self.cfg = cfg
         self.data_path = cfg.data_path
-        self.train_path = os.path.join(cfg.data_path, 'Brats2021Train')
+        self.train_path = cfg.TrainPath
 
         self.train_dict = []
         self.val_dict = []
