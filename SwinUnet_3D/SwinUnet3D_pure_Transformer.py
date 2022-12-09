@@ -505,7 +505,7 @@ class SwinUnet3D(nn.Module):
 
 
 # 原始论文中 layers=[2,2,6,2]
-def swinUnet_t_3D(hidden_dim=96, layers=(2, 2, 4, 2), heads=(3, 6, 9, 12), num_classes: int = 2, **kwargs):
+def swinUnet_p_3D(hidden_dim=96, layers=(2, 2, 4, 2), heads=(3, 6, 9, 12), num_classes: int = 2, **kwargs):
     return SwinUnet3D(hidden_dim=hidden_dim, layers=layers, heads=heads, num_classes=num_classes, **kwargs)
 
 
@@ -514,7 +514,7 @@ from torchkeras import summary
 if __name__ == '__main__':
     x = torch.randn((1, 3, 224, 224, 160))
     window_size = [i // 32 for i in x.shape[2:]]
-    seg = swinUnet_t_3D(hidden_dim=96, layers=(2, 2, 6, 2), heads=(3, 6, 12, 24),
+    seg = swinUnet_p_3D(hidden_dim=96, layers=(2, 2, 6, 2), heads=(3, 6, 12, 24),
                         window_size=window_size, in_channel=3, num_classes=4
                         )
     '''

@@ -51,7 +51,7 @@ from timm.models.layers import trunc_normal_
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
 
 from SwinUnet_3D import swinUnet_t_3D
-from SwinUnet_3D.SwinUnet3D_pure_Transformer import SwinUnet3D as SwinPureUnet3D
+from SwinUnet_3D import swinUnet_p_3D as SwinPureUnet3D
 
 
 def get_nnunet_k_s(final_shape, spacings):  #
@@ -83,7 +83,8 @@ def get_nnunet_k_s(final_shape, spacings):  #
 
 
 class Config(object):
-    seed = 42  # 设置随机数种子
+    # seed = 42  # 设置随机数种子
+    seed = 3407  # 设置随机数种子
     spacings = [1.0, 1.0, 1.0]
     # RoiSize = [256 // spacings[0], 256 // spacings[1], 160 // spacings[2]]
     RoiSize = [128, 128, 128]  # SwinBTS和SwinUnetR需要hwd三个方向上的大小一致，其余的模型不需要
@@ -115,13 +116,14 @@ class Config(object):
 
     lr = 3e-4  # 学习率
 
-    # model_name = 'SwinUnet3D'
-    # model_name = 'Unet3D'
+    model_name = 'Unet3D'
     # model_name = 'VNet'
     # model_name = 'UNetR'
-    # model_name = 'SwinUNETR'
+    # model_name = 'SwinUNETR'       # 不使用这个模型
     # model_name = 'SwinBTS'
-    model_name = 'AttentionUnet'
+    # model_name = 'AttentionUnet'
+    # model_name = 'SwinUnet3D'
+    # model_name = 'SwinPureUnet3D'
 
     ModelDict = {}
     ArgsDict = {}
@@ -147,6 +149,9 @@ class Config(object):
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
+
+    ModelDict['SwinPureUnet3D'] = SwinPureUnet3D
+    ArgsDict['SwinPureUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
 
     # NeedTrain = False
     NeedTrain = True
@@ -565,21 +570,24 @@ def ModelParamInit(model):
                 nn.init.constant_(m.bias, 0)
 
 
-def setseed(seed: int = Config.seed):
-    pl.seed_everything(seed)
-    set_determinism(seed)
+def setseed(cfg=Config()):
+    pl.seed_everything(cfg.seed)
+    set_determinism(cfg.seed)
 
 
-def main():
-    data = Brats2021DataSet()
-    model = Brats2021Model()
+def main(model_name: str = 'Unet3D', seed: int = 3407, cfg=Config()):
+    cfg.model_name = model_name
+    cfg.seed = seed
+    setseed(cfg)
+
+    data = Brats2021DataSet(cfg)
+    model = Brats2021Model(cfg)
 
     early_stop = EarlyStopping(
         monitor='valid_mean_loss',
         patience=5,
     )
 
-    cfg = Config()
     check_point = ModelCheckpoint(dirpath=f'./logs/{cfg.model_name}',
                                   save_last=False,
                                   save_top_k=3, monitor='valid_mean_loss', verbose=True,
@@ -613,10 +621,15 @@ def main():
         model.eval()
         model.freeze()
 
-    predict_data = Brats2021DataSet()
     trainer.predict(model, datamodule=data)
 
 
 if __name__ == '__main__':
-    setseed()
-    main()
+    # main()
+    model_names = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'AttentionUnet',
+                   'SwinUnet3D', 'SwinPureUnet3D']
+
+    # g_seed = 42
+    g_seed = 3407
+    for name in model_names:
+        main(name, g_seed)

@@ -52,6 +52,7 @@ from timm.models.layers import trunc_normal_
 
 from SwinUnet_3D import swinUnet_t_3D
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
+from SwinUnet_3D import swinUnet_p_3D as SwinPureUnet3D
 
 
 def get_nnunet_k_s(final_shape, spacings):  #
@@ -84,6 +85,7 @@ def get_nnunet_k_s(final_shape, spacings):  #
 
 class Config(object):
     seed = 42  # 设置随机数种子
+    # seed = 3407
     spacings = [1.0, 1.0, 1.0]
     # RoiSize = [256 // spacings[0], 256 // spacings[1], 160 // spacings[2]]
     RoiSize = [128, 128, 128]  # SwinBTS和SwinUnetR需要hwd三个方向上的大小一致，其余的模型不需要
@@ -119,14 +121,12 @@ class Config(object):
 
     # model_name = 'Unet3D'
     # model_name = 'VNet'
-    # model_name = 'SwinUnet3D'
-
     # model_name = 'UNetR'
-    # model_name = 'SwinBTS'
-    # model_name = 'TransBTS'
-
     # model_name = 'SwinUNETR'
-    model_name = 'AttentionUnet'
+    # model_name = 'SwinBTS'
+    # model_name = 'AttentionUnet'
+    # model_name = 'SwinUnet3D'
+    model_name = 'SwinPureUnet3D'
 
     ModelDict = {}
     ArgsDict = {}
@@ -157,6 +157,9 @@ class Config(object):
 
     ModelDict['SwinUnet3D'] = swinUnet_t_3D
     ArgsDict['SwinUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
+
+    ModelDict['SwinPureUnet3D'] = SwinPureUnet3D
+    ArgsDict['SwinPureUnet3D'] = {'in_channel': in_channels, 'num_classes': n_classes, 'window_size': window_size}
 
     # NeedTrain = False
     NeedTrain = True
@@ -582,14 +585,18 @@ def ModelParamInit(model):
                 nn.init.constant_(m.bias, 0)
 
 
-def setseed(seed: int = 42):
-    pl.seed_everything(seed)
-    set_determinism(seed)
+def setseed(cfg=Config()):
+    pl.seed_everything(cfg.seed)
+    set_determinism(cfg.seed)
 
 
-def main():
-    data = Brats2021DataSet()
-    model = Brats2021Model()
+def main(model_name: str = 'Unet3D', seed: int = 3407, cfg=Config()):
+    cfg.model_name = model_name
+    cfg.seed = seed
+    setseed(cfg)
+
+    data = Brats2021DataSet(cfg)
+    model = Brats2021Model(cfg)
 
     early_stop = EarlyStopping(
         monitor='valid_mean_loss',
@@ -636,7 +643,14 @@ def main():
 
 
 if __name__ == '__main__':
-    setseed(seed=Config.seed)
-    torch.multiprocessing.set_sharing_strategy('file_system')
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-    main()
+    # torch.multiprocessing.set_sharing_strategy('file_system')
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+    # model_names = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'AttentionUnet',
+    #                'SwinUnet3D', 'SwinPureUnet3D']
+    model_names = ['SwinPureUnet3D']
+
+    g_seed = 42
+    # g_seed = 3407
+    for name in model_names:
+        main(name, g_seed)
