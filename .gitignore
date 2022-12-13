@@ -5,3 +5,5 @@
 */__pycache__/
 *.ckpt
 venv_w
+SwinUnet_3DPre
+*.csv

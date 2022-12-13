@@ -265,9 +265,9 @@ class PatchMerging3D(nn.Module):
         return x  # B,  H //down_scaling, W//down_scaling, D//down_scaling, out_dim
 
 
-class PatchExpanding3D(nn.Module):
+class PatchExpand3D(nn.Module):
     def __init__(self, in_dim, out_dim, up_scaling_factor):
-        super(PatchExpanding3D, self).__init__()
+        super(PatchExpand3D, self).__init__()
 
         stride = up_scaling_factor
         kernel_size = up_scaling_factor
@@ -322,7 +322,7 @@ class ConvBlock(nn.Module):
         return x
 
 
-class Encoder(nn.Module):
+class StageModuleDownScaling3D(nn.Module):
     def __init__(self, in_dims, hidden_dimension, layers, downscaling_factor, num_heads, head_dim,
                  window_size: Union[int, List[int]], relative_pos_embedding: bool = True, dropout: float = 0.0):
         super().__init__()
@@ -359,14 +359,14 @@ class Encoder(nn.Module):
         return x
 
 
-class Decoder(nn.Module):
+class StageModuleUpScaling3D(nn.Module):
     def __init__(self, in_dims, out_dims, layers, up_scaling_factor, num_heads, head_dim,
                  window_size: Union[int, List[int]], relative_pos_embedding, dropout: float = 0.0):
         super().__init__()
         assert layers % 2 == 0, 'Stage layers need to be divisible by 2 for regular and shifted block.'
 
-        self.patch_expand = PatchExpanding3D(in_dim=in_dims, out_dim=out_dims,
-                                             up_scaling_factor=up_scaling_factor)
+        self.patch_expand = PatchExpand3D(in_dim=in_dims, out_dim=out_dims,
+                                          up_scaling_factor=up_scaling_factor)
 
         self.conv_block = ConvBlock(in_ch=out_dims, out_ch=out_dims)
         self.re1 = Rearrange('b c h w d -> b h w d c')
@@ -427,43 +427,43 @@ class SwinUnet3D(nn.Module):
         self.dsf = downscaling_factors
         self.window_size = window_size
 
-        self.enc12 = Encoder(in_dims=in_channel, hidden_dimension=hidden_dim, layers=layers[0],
-                             downscaling_factor=downscaling_factors[0], num_heads=heads[0],
-                             head_dim=head_dim, window_size=window_size, dropout=dropout,
-                             relative_pos_embedding=relative_pos_embedding)
-        self.enc3 = Encoder(in_dims=hidden_dim, hidden_dimension=hidden_dim * 2,
-                            layers=layers[1],
-                            downscaling_factor=downscaling_factors[1], num_heads=heads[1],
-                            head_dim=head_dim, window_size=window_size, dropout=dropout,
-                            relative_pos_embedding=relative_pos_embedding)
-        self.enc4 = Encoder(in_dims=hidden_dim * 2, hidden_dimension=hidden_dim * 4,
-                            layers=layers[2],
-                            downscaling_factor=downscaling_factors[2], num_heads=heads[2],
-                            head_dim=head_dim, window_size=window_size, dropout=dropout,
-                            relative_pos_embedding=relative_pos_embedding)
-        self.enc5 = Encoder(in_dims=hidden_dim * 4, hidden_dimension=hidden_dim * 8,
-                            layers=layers[3],
-                            downscaling_factor=downscaling_factors[3], num_heads=heads[3],
-                            head_dim=head_dim, window_size=window_size, dropout=dropout,
-                            relative_pos_embedding=relative_pos_embedding)
+        self.down_stage12 = StageModuleDownScaling3D(in_dims=in_channel, hidden_dimension=hidden_dim, layers=layers[0],
+                                                     downscaling_factor=downscaling_factors[0], num_heads=heads[0],
+                                                     head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                     relative_pos_embedding=relative_pos_embedding)
+        self.down_stage3 = StageModuleDownScaling3D(in_dims=hidden_dim, hidden_dimension=hidden_dim * 2,
+                                                    layers=layers[1],
+                                                    downscaling_factor=downscaling_factors[1], num_heads=heads[1],
+                                                    head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                    relative_pos_embedding=relative_pos_embedding)
+        self.down_stage4 = StageModuleDownScaling3D(in_dims=hidden_dim * 2, hidden_dimension=hidden_dim * 4,
+                                                    layers=layers[2],
+                                                    downscaling_factor=downscaling_factors[2], num_heads=heads[2],
+                                                    head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                    relative_pos_embedding=relative_pos_embedding)
+        self.features = StageModuleDownScaling3D(in_dims=hidden_dim * 4, hidden_dimension=hidden_dim * 8,
+                                                 layers=layers[3],
+                                                 downscaling_factor=downscaling_factors[3], num_heads=heads[3],
+                                                 head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                 relative_pos_embedding=relative_pos_embedding)
 
-        self.dec4 = Decoder(in_dims=hidden_dim * 8, out_dims=hidden_dim * 4,
-                            layers=layers[2],
-                            up_scaling_factor=downscaling_factors[3], num_heads=heads[2],
-                            head_dim=head_dim, window_size=window_size, dropout=dropout,
-                            relative_pos_embedding=relative_pos_embedding)
+        self.up_stage4 = StageModuleUpScaling3D(in_dims=hidden_dim * 8, out_dims=hidden_dim * 4,
+                                                layers=layers[2],
+                                                up_scaling_factor=downscaling_factors[3], num_heads=heads[2],
+                                                head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                relative_pos_embedding=relative_pos_embedding)
 
-        self.dec3 = Decoder(in_dims=hidden_dim * 4, out_dims=hidden_dim * 2,
-                            layers=layers[1],
-                            up_scaling_factor=downscaling_factors[2], num_heads=heads[1],
-                            head_dim=head_dim, window_size=window_size, dropout=dropout,
-                            relative_pos_embedding=relative_pos_embedding)
+        self.up_stage3 = StageModuleUpScaling3D(in_dims=hidden_dim * 4, out_dims=hidden_dim * 2,
+                                                layers=layers[1],
+                                                up_scaling_factor=downscaling_factors[2], num_heads=heads[1],
+                                                head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                relative_pos_embedding=relative_pos_embedding)
 
-        self.dec12 = Decoder(in_dims=hidden_dim * 2, out_dims=hidden_dim,
-                             layers=layers[0],
-                             up_scaling_factor=downscaling_factors[1], num_heads=heads[0],
-                             head_dim=head_dim, window_size=window_size, dropout=dropout,
-                             relative_pos_embedding=relative_pos_embedding)
+        self.up_stage12 = StageModuleUpScaling3D(in_dims=hidden_dim * 2, out_dims=hidden_dim,
+                                                 layers=layers[0],
+                                                 up_scaling_factor=downscaling_factors[1], num_heads=heads[0],
+                                                 head_dim=head_dim, window_size=window_size, dropout=dropout,
+                                                 relative_pos_embedding=relative_pos_embedding)
 
         self.converge4 = Converge(hidden_dim * 4)
         self.converge3 = Converge(hidden_dim * 2)
@@ -491,20 +491,20 @@ class SwinUnet3D(nn.Module):
         assert y_s % (y_ws * 32) == 0, f'y轴上的尺寸必须能被y_window_size*32 整除'
         assert z_s % (z_ws * 32) == 0, f'y轴上的尺寸必须能被z_window_size*32 整除'
 
-        down12_1 = self.enc12(img)  # (B,C, X//4, Y//4, Z//4)
-        down3 = self.enc3(down12_1)  # (B, 2C,X//8, Y//8, Z//8)
-        down4 = self.enc4(down3)  # (B, 4C,X//16, Y//16, Z//16)
-        features = self.enc5(down4)  # (B, 8C,X//32, Y//32, Z//32)
+        down12_1 = self.down_stage12(img)  # (B,C, X//4, Y//4, Z//4)
+        down3 = self.down_stage3(down12_1)  # (B, 2C,X//8, Y//8, Z//8)
+        down4 = self.down_stage4(down3)  # (B, 4C,X//16, Y//16, Z//16)
+        features = self.features(down4)  # (B, 8C,X//32, Y//32, Z//32)
 
-        up4 = self.dec4(features)  # (B, 8C, X//16, Y//16, Z//16 )
+        up4 = self.up_stage4(features)  # (B, 8C, X//16, Y//16, Z//16 )
         # up1和 down3融合
         up4 = self.converge4(up4, down4)  # (B, 4C, X//16, Y//16, Z//16)
 
-        up3 = self.dec3(up4)  # ((B, 2C,X//8, Y//8, Z//8)
+        up3 = self.up_stage3(up4)  # ((B, 2C,X//8, Y//8, Z//8)
         # up2和 down2融合
         up3 = self.converge3(up3, down3)  # (B,2C, X//8, Y//8)
 
-        up12 = self.dec12(up3)  # (B,C, X//4, Y//4, Z// 4)
+        up12 = self.up_stage12(up3)  # (B,C, X//4, Y//4, Z// 4)
         # up3和 down1融合
         up12 = self.converge12(up12, down12_1)  # (B,C, X//4, Y//4, Z//4)
 

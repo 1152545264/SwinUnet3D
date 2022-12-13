@@ -52,6 +52,7 @@ from OthersModel.Swin_BTS.SwinUnet import swinunetr
 
 from SwinUnet_3D import swinUnet_t_3D
 from SwinUnet_3D import swinUnet_p_3D as SwinPureUnet3D
+from OthersModel.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS, BTS
 
 
 def get_nnunet_k_s(final_shape, spacings):  #
@@ -142,6 +143,11 @@ class Config(object):
 
     ModelDict['SwinBTS'] = swinunetr
     ArgsDict['SwinBTS'] = {'image_size': 128, 'patch_size': 4, 'in_chans': in_channels, 'num_lables': n_classes}
+
+    ModelDict['TransBTS'] = BTS
+    ArgsDict['TransBTS'] = {'img_dim': 128, 'patch_dim': 8, 'num_channels': in_channels,
+                            'num_classes': n_classes, 'embedding_dim': 512,
+                            'num_heads': 8, 'num_layers': 4, 'hidden_dim': 4096, }
 
     ModelDict['AttentionUnet'] = AttentionUnet
     ArgsDict['AttentionUnet'] = {'spatial_dims': 3, 'in_channels': in_channels, 'out_channels': n_classes,
@@ -452,22 +458,19 @@ class Brats2021Model(pl.LightningModule):
             self.log('valid_wt_dice', wt_dice, prog_bar=True)
 
             self.log('valid_loss', loss, prog_bar=True)
-            if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-                meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
-                for k, v in meta_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        meta_dict[k] = v.detach().cpu()
-
-                y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
-                y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-                y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
-                y_hat = torch.stack(y_hat)  # B,H,W,D
-                y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-                saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
-                saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
-
-                # names = batch['image_meta_dict']['filename_or_obj']
-                # self.save_pred_label(y_hat, names)
+            # if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
+            #     meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+            #     for k, v in meta_dict.items():
+            #         if isinstance(v, torch.Tensor):
+            #             meta_dict[k] = v.detach().cpu()
+            #
+            #     y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+            #     y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+            #     y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+            #     y_hat = torch.stack(y_hat)  # B,H,W,D
+            #     y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+            #     saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+            #     saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
 
             return {'valid_loss': loss, 'valid_dice': dices}
 
@@ -481,15 +484,16 @@ class Brats2021Model(pl.LightningModule):
             for k, v in meta_dict.items():
                 if isinstance(v, torch.Tensor):
                     meta_dict[k] = v.detach().cpu()
-
-            preds = preds.detach().cpu()
-            preds = [self.post_trans(i) for i in decollate_batch(preds)]
-            preds = [self.label_reverse(i) for i in preds]
-            preds = torch.stack(preds)  # B,H,W,D
-            preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-
-            saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
-            saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
+            #
+            # preds = preds.detach().cpu()
+            # preds = [self.post_trans(i) for i in decollate_batch(preds)]
+            # preds = [self.label_reverse(i) for i in preds]
+            # preds = torch.stack(preds)  # B,H,W,D
+            # preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+            #
+            # saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
+            # saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
+        pass
 
     def training_epoch_end(self, outputs):
         losses, mean_dice = self.shared_epoch_end(outputs, 'loss')
@@ -626,10 +630,16 @@ def main(model_name: str = 'Unet3D', seed: int = 3407, cfg=Config()):
 
 if __name__ == '__main__':
     # main()
-    model_names = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'AttentionUnet',
-                   'SwinUnet3D', 'SwinPureUnet3D']
+    g_seeds = [42]
+    # model_names = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'AttentionUnet',
+    #                'SwinUnet3D', 'SwinPureUnet3D']
 
-    # g_seed = 42
-    g_seed = 3407
-    for name in model_names:
-        main(name, g_seed)
+    all_models = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'TransBTS', 'AttentionUnet',
+                  'SwinUnet3D', 'SwinPureUnet3D']
+
+    model_names = all_models[4:]
+    # g_seeds = [2022, 3407]
+    # model_names = ['Unet3D', 'SwinUnet3D', 'SwinPureUnet3D', 'UNetR']
+    for g_seed in g_seeds:
+        for name in model_names:
+            main(name, g_seed)

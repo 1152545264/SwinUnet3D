@@ -22,7 +22,6 @@ from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
 from monai.networks.nets import UNETR, UNet, VNet, DynUNet, SegResNet, SwinUNETR, AttentionUnet, DiNTS
-from OthersModel.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS, BTS
 from monai.networks.nets import TopologySearch
 
 from monai.transforms import (
@@ -51,7 +50,9 @@ from monai.transforms import (
 from timm.models.layers import trunc_normal_
 
 from SwinUnet_3D import swinUnet_t_3D
+# from SwinUnet_3DPre import swinUnet_t_3D
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
+from OthersModel.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS, BTS
 from SwinUnet_3D import swinUnet_p_3D as SwinPureUnet3D
 
 
@@ -237,9 +238,9 @@ def save_pred(pred, predSavePath):
     write_nifti(pred2, file_name=predSavePath)
 
 
-class Brats2021DataSet(pl.LightningDataModule):
+class Brats2018DataSet(pl.LightningDataModule):
     def __init__(self, cfg=Config()):
-        super(Brats2021DataSet, self).__init__()
+        super(Brats2018DataSet, self).__init__()
         self.cfg = cfg
         self.data_path = cfg.data_path
         self.train_path = os.path.join(cfg.data_path, 'Train')
@@ -390,9 +391,9 @@ class Brats2021DataSet(pl.LightningDataModule):
         # 设置generator保证不同模型划分出来的训练集和验证集相同
 
 
-class Brats2021Model(pl.LightningModule):
+class Brats2018Model(pl.LightningModule):
     def __init__(self, cfg=Config()):
-        super(Brats2021Model, self).__init__()
+        super(Brats2018Model, self).__init__()
         self.cfg = cfg
         model = cfg.ModelDict[cfg.model_name]
         kwargs = cfg.ArgsDict[cfg.model_name]
@@ -463,23 +464,20 @@ class Brats2021Model(pl.LightningModule):
             self.log('valid_wt_dice', wt_dice, prog_bar=True)
 
             self.log('valid_loss', loss, prog_bar=True)
-            if self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-                meta_dict = batch['label_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
-                for k, v in meta_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        meta_dict[k] = v.detach().cpu()
-
-                y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
-                # y_hat = y_hat.as_tensor()
-                y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-                y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
-                y_hat = torch.stack(y_hat)  # B,H,W,D
-                y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-                saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
-                saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
-
-                # names = batch['image_meta_dict']['filename_or_obj']
-                # self.save_pred_label(y_hat, names)
+            # if self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
+            #     meta_dict = batch['label_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+            #     for k, v in meta_dict.items():
+            #         if isinstance(v, torch.Tensor):
+            #             meta_dict[k] = v.detach().cpu()
+            #
+            #     y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+            #     # y_hat = y_hat.as_tensor()
+            #     y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+            #     y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+            #     y_hat = torch.stack(y_hat)  # B,H,W,D
+            #     y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+            #     saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+            #     saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
 
             return {'valid_loss': loss, 'valid_dice': dices}
 
@@ -595,8 +593,8 @@ def main(model_name: str = 'Unet3D', seed: int = 3407, cfg=Config()):
     cfg.seed = seed
     setseed(cfg)
 
-    data = Brats2021DataSet(cfg)
-    model = Brats2021Model(cfg)
+    data = Brats2018DataSet(cfg)
+    model = Brats2018Model(cfg)
 
     early_stop = EarlyStopping(
         monitor='valid_mean_loss',
@@ -634,7 +632,7 @@ def main(model_name: str = 'Unet3D', seed: int = 3407, cfg=Config()):
     else:
         save_path = f'./trained_models/{cfg.model_name}/epoch=95-valid_loss=0.15-et_valid_mean_dice=0.85.ckpt'
 
-        model = Brats2021Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
+        model = Brats2018Model.load_from_checkpoint(save_path)  # 这是个类方法，不是对象方法
         model.eval()
         model.freeze()
 
@@ -646,11 +644,13 @@ if __name__ == '__main__':
     # torch.multiprocessing.set_sharing_strategy('file_system')
     # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
+    g_seeds = [42]
     # model_names = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'AttentionUnet',
     #                'SwinUnet3D', 'SwinPureUnet3D']
-    model_names = ['SwinPureUnet3D']
 
-    g_seed = 42
-    # g_seed = 3407
-    for name in model_names:
-        main(name, g_seed)
+    model_names = ['Unet3D', 'VNet', 'UNetR', 'SwinBTS', 'SwinUnet3D', 'SwinPureUnet3D']
+    # g_seeds = [2022, 3407]
+    # model_names = ['Unet3D', 'SwinUnet3D', 'SwinPureUnet3D', 'UNetR']
+    for g_seed in g_seeds:
+        for name in model_names:
+            main(name, g_seed)
