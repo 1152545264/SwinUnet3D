@@ -7,3 +7,5 @@
 venv_w
 SwinUnet_3DPre
 *.csv
+**/graphTable/
+**/csv_files/
