@@ -38,40 +38,40 @@ class Brats2021Model2(Brats2021Model):
                                              sw_batch_size=1, predictor=self.net)
             loss, dices = self.shared_step(y_hat, y, 1)
 
-        if cfg.SaveTrainPred:
-            meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
-            for k, v in meta_dict.items():
-                if isinstance(v, torch.Tensor):
-                    meta_dict[k] = v.detach().cpu()
-
-            y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
-            y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-            y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
-            y_hat = torch.stack(y_hat)  # B,H,W,D
-            y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-            saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
-            saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
+        # if cfg.SaveTrainPred:
+        #     meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+        #     for k, v in meta_dict.items():
+        #         if isinstance(v, torch.Tensor):
+        #             meta_dict[k] = v.detach().cpu()
+        #
+        #     y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
+        #     y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
+        #     y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+        #     y_hat = torch.stack(y_hat)  # B,H,W,D
+        #     y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+        #     saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+        #     saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
 
         return {'valid_loss': loss, 'valid_dice': dices}
 
+    def validation_epoch_end(self, outputs):
+        cfg = self.cfg
+        losses, mean_dice = self.shared_epoch_end(outputs, 'valid_loss', 1)
+        # mean_dice = torch.nan_to_num(mean_dice)
 
-def validation_epoch_end(self, outputs):
-    cfg = self.cfg
-    losses, mean_dice = self.shared_epoch_end(outputs, 'valid_loss', 1)
-    # mean_dice = torch.nan_to_num(mean_dice)
-
-    res_df = pd.DataFrame(columns=['ET', 'TC', 'WT'])
-    mean_dice_1 = mean_dice.detach().cpu().numpy()
-    res_df['ET'] = mean_dice_1[:, 0]
-    res_df['TC'] = mean_dice_1[:, 1]
-    res_df['WT'] = mean_dice_1[:, 2]
-    if not os.path.exists('./csv_files'):
-        os.mkdir('./csv_files')
-    res_df.to_csv(os.path.join('./csv_files', cfg.model_name) + '.csv', index=False)
+        res_df = pd.DataFrame(columns=['ET', 'TC', 'WT'])
+        mean_dice_1 = mean_dice.detach().cpu().numpy()
+        res_df['ET'] = mean_dice_1[:, 0]
+        res_df['TC'] = mean_dice_1[:, 1]
+        res_df['WT'] = mean_dice_1[:, 2]
+        if not os.path.exists('./csv_files'):
+            os.mkdir('./csv_files')
+        res_df.to_csv(os.path.join('./csv_files', cfg.model_name) + '.csv', index=False)
 
 
 def main(model_name: str = 'Unet3D', seed: int = 3407, cfg=Config2()):
     cfg.model_name = model_name
+    cfg.ValidSegDir = os.path.join(cfg.data_path, 'ValidSeg', model_name)
     cfg.NeedTrain = False
     cfg.seed = seed
     cfg.SaveTrainPred = True
