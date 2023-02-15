@@ -22,11 +22,11 @@ from monai.utils import set_determinism
 from monai.data import decollate_batch
 from monai.data import NiftiSaver, write_nifti
 from monai.networks.nets import UNet, VNet, AttentionUnet, RegUNet, SegResNet
-from SwinUnet import SwinTransformerSys
-from Unet3_Plus.Unet3_Plus import UNet3Plus
+from OthersModel.SwinUnet import SwinTransformerSys
+from OthersModel.Unet3_Plus.Unet3_Plus import UNet3Plus
 
-from TransUnet.vit_seg_modeling import VisionTransformer as ViT_seg
-from TransUnet.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
+from OthersModel.TransUnet.vit_seg_modeling import VisionTransformer as ViT_seg
+from OthersModel.TransUnet.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
 
 from monai.transforms import (
     Activations,
@@ -95,7 +95,8 @@ class Config(object):
 
     RoiSize = [256 // spacings[0], 256 // spacings[1]]
     RoiSize = [int(it) for it in RoiSize]
-    window_size = [it // 32 for it in RoiSize]  # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    # 针对siwnUnet3D而言的窗口大小,FinalShape[i]能被window_size[i]数整除
+    window_size = [it // 32 for it in RoiSize]
     in_channels = 4
 
     l_percent = 0.5
@@ -104,7 +105,8 @@ class Config(object):
     train_ratio, val_ratio, test_ratio = [0.8, 0.2, 0.0]
     BatchSize = 1
     sw_batch_size = 1
-    NumWorkers = 4  # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
+    # 如果此处NumWorkers > 0, 则需要加大操作系统中swap分区(Linux)的数值或者虚拟内存的数值(windows)
+    NumWorkers = 4
 
     max_epoch = 60
     min_epoch = 50
@@ -142,7 +144,8 @@ class Config(object):
                         'channels': (64, 128, 256, 512, 1024), 'strides': (2, 2, 2, 2)}
 
     ModelDict['VNet'] = VNet
-    ArgsDict['VNet'] = {'spatial_dims': 2, 'in_channels': in_channels, 'out_channels': n_classes, 'dropout_prob': 0.0, }
+    ArgsDict['VNet'] = {'spatial_dims': 2, 'in_channels': in_channels,
+                        'out_channels': n_classes, 'dropout_prob': 0.0, }
 
     ModelDict['SwinUnet'] = SwinTransformerSys
     ArgsDict['SwinUnet'] = {'img_size': RoiSize[0], 'in_chans': in_channels, 'num_classes': n_classes,
@@ -150,7 +153,8 @@ class Config(object):
                             'window_size': RoiSize[0] // 32}
 
     ModelDict['Unet3_Plus'] = UNet3Plus
-    ArgsDict['Unet3_Plus'] = {'n_channels': in_channels, 'n_classes': n_classes}
+    ArgsDict['Unet3_Plus'] = {
+        'n_channels': in_channels, 'n_classes': n_classes}
 
     ModelDict['AttentionUnet'] = AttentionUnet
     ArgsDict['AttentionUnet'] = {'spatial_dims': 2, 'in_channels': 4, 'out_channels': 3,
@@ -364,11 +368,14 @@ class Brats2021DataSet(pl.LightningDataModule):
         for _, dirs, _ in os.walk(FP):
             for dr in dirs:
                 tmp = os.path.join(FP, dr)
-                flair_file = glob(os.path.join(tmp, '*flair.nii.gz'), recursive=True)
+                flair_file = glob(os.path.join(
+                    tmp, '*flair.nii.gz'), recursive=True)
                 t1_file = glob(os.path.join(tmp, '*t1.nii.gz'), recursive=True)
-                t1_ce_file = glob(os.path.join(tmp, '*t1ce.nii.gz'), recursive=True)
+                t1_ce_file = glob(os.path.join(
+                    tmp, '*t1ce.nii.gz'), recursive=True)
                 t2_file = glob(os.path.join(tmp, '*t2.nii.gz'), recursive=True)
-                seg_file = glob(os.path.join(tmp, '*seg.nii.gz'), recursive=True)
+                seg_file = glob(os.path.join(
+                    tmp, '*seg.nii.gz'), recursive=True)
                 files = [*flair_file, *t1_file, *t1_ce_file, *t2_file]
                 train_x.append(files)
                 train_y.append(seg_file)
@@ -429,7 +436,8 @@ class Brats2021Model(pl.LightningModule):
                           lr=cfg.lr, eps=1e-7,
                           weight_decay=1e-5)
 
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.LRCycle)
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=cfg.LRCycle)
         return {'optimizer': opt, 'lr_scheduler': lr_scheduler, 'monitor': 'valid_mean_loss'}
 
     # def on_train_start(self):
@@ -474,17 +482,21 @@ class Brats2021Model(pl.LightningModule):
             self.log('valid_loss', loss, prog_bar=True)
             # if wt_dice > 0.85 and self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
             if self.cfg.SaveTrainPred:  # 保存验证过程中的预测标签
-                meta_dict = batch['image_meta_dict']  # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+                # 将meta_dict中的值转成cpu()向量，原来位于GPU上
+                meta_dict = batch['image_meta_dict']
                 for k, v in meta_dict.items():
                     if isinstance(v, torch.Tensor):
                         meta_dict[k] = v.detach().cpu()
 
                 y_hat = y_hat.detach().cpu()  # 转成cpu向量之后才能存
                 y_hat = [self.post_trans(i) for i in decollate_batch(y_hat)]
-                y_hat = [self.label_reverse(i) for i in y_hat]  # 此时y_hat的维度为[H,W,D]
+                y_hat = [self.label_reverse(i)
+                         for i in y_hat]  # 此时y_hat的维度为[H,W,D]
                 y_hat = torch.stack(y_hat)  # B,H,W,D
-                y_hat = torch.unsqueeze(y_hat, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
-                saver = NiftiSaver(output_dir=self.cfg.ValidSegDir, mode="nearest", print_log=False)
+                # 增加通道维度，saver需要的格式为B,C,H,W,D
+                y_hat = torch.unsqueeze(y_hat, dim=1)
+                saver = NiftiSaver(output_dir=self.cfg.ValidSegDir,
+                                   mode="nearest", print_log=False)
                 saver.save_batch(y_hat, meta_dict)  # fixme 检查此处用法是否正确
 
                 # names = batch['image_meta_dict']['filename_or_obj']
@@ -505,7 +517,8 @@ class Brats2021Model(pl.LightningModule):
             preds = [self.post_trans(i) for i in decollate_batch(preds)]
             preds = [self.label_reverse(i) for i in preds]
             preds = torch.stack(preds)  # B,H,W,D
-            preds = torch.unsqueeze(preds, dim=1)  # 增加通道维度，saver需要的格式为B,C,H,W,D
+            # 增加通道维度，saver需要的格式为B,C,H,W,D
+            preds = torch.unsqueeze(preds, dim=1)
 
             saver = NiftiSaver(output_dir=self.cfg.PredSegDir, mode="nearest")
             saver.save_batch(preds, meta_dict)  # fixme 检查此处用法是否正确
@@ -524,7 +537,8 @@ class Brats2021Model(pl.LightningModule):
             self.log('et_train_mean_dice', et_mean_dice, prog_bar=True)
 
     def validation_epoch_end(self, outputs):
-        losses, dices = self.shared_epoch_end(outputs, 'valid_loss', 'valid_dice')
+        losses, dices = self.shared_epoch_end(
+            outputs, 'valid_loss', 'valid_dice')
         if len(losses) > 0:
             mean_loss = torch.mean(losses)
             mean_dice = torch.mean(dices, dim=0)
@@ -617,7 +631,8 @@ def main():
 
     if Config.NeedTrain:
         trainer.fit(model, data)
-        trainer.save_checkpoint(f'./trained_models/{cfg.model_name}/TrainedModel.ckpt')
+        trainer.save_checkpoint(
+            f'./trained_models/{cfg.model_name}/TrainedModel.ckpt')
     else:
         save_path = f'./trained_models/{cfg.model_name}/TrainedModel.ckpt'
 

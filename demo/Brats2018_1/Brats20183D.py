@@ -49,11 +49,11 @@ from monai.transforms import (
 )
 from timm.models.layers import trunc_normal_
 
-from SwinUnet_3D import swinUnet_t_3D
+from SwinUnet_3DV2 import swinUnet_t_3D
 # from SwinUnet_3DPre import swinUnet_t_3D
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
 from OthersModel.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS, BTS
-from SwinUnet_3D import swinUnet_p_3D as SwinPureUnet3D
+from SwinUnet_3DV2 import swinUnet_p_3D as SwinPureUnet3D
 
 
 def get_nnunet_k_s(final_shape, spacings):  #

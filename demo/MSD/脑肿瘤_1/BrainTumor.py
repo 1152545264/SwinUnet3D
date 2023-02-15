@@ -49,7 +49,7 @@ from monai.transforms import (
 )
 from timm.models.layers import trunc_normal_
 
-from SwinUnet_3D import swinUnet_t_3D
+from SwinUnet_3DV2 import swinUnet_t_3D
 
 
 def setseed(seed: int = 42):

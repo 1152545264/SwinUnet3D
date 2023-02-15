@@ -16,7 +16,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from monai.config import KeysCollection
 from torch.utils.data import random_split
-from SwinUnet_3D import swinUnet_t_3D
+from SwinUnet_3DV2 import swinUnet_t_3D
 from monai.networks.nets import UNet, UNETR
 
 

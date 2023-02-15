@@ -50,8 +50,8 @@ from monai.transforms import (
 from timm.models.layers import trunc_normal_
 from OthersModel.Swin_BTS.SwinUnet import swinunetr
 
-from SwinUnet_3D import swinUnet_t_3D
-from SwinUnet_3D import swinUnet_p_3D as SwinPureUnet3D
+from SwinUnet_3DV2 import swinUnet_t_3D
+from SwinUnet_3DV2 import swinUnet_p_3D as SwinPureUnet3D
 from OthersModel.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS, BTS
 
 
