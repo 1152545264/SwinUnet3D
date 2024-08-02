@@ -1,7 +1,7 @@
 # SwinUnet3D
 demo中最后一个字母为1的表示可以正常使用，为0的表示图像没有预处理好，效果很差，dice系数小于0.001 ，所有训练脚本都放在了demo文件夹中。
 
-下载好对应的数据集之后，记得去Config类中把下图中的data_path、TrainPath和PredDataDir改成自己的路径即可完成训练
+下载好对应的数据集之后，记得去Config类中把下图中的data_path、TrainPath和PredDataDir改成自己的路径即可完成训练，模型预测结果存放到了PredDataDir中，现将预测集用iTK-SNAP或者3Dslicer打开，再将PredDataDir中对应的预测结果拖进去 ，即可三维可视化分割结果
 ![img.png](img.png)
 
 训练主函数位置：
